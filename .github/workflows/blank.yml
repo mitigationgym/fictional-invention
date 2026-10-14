@@ -1,36 +1,349 @@
-# This is a basic workflow to help you get started with Actions
+name: QuickSafe Ultra Verbose Research
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: read
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+  quicksafe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      LC_ALL: C
+      QS_REPO: https://github.com/vusec/QuickSafe.git
+      QS_REF: master
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: '01 - Host and security diagnostics'
+        shell: bash
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          set -euo pipefail
+          mkdir -p results
+          {
+            date -u
+            uname -a
+            cat /etc/os-release
+            getconf PAGE_SIZE
+            id
+            ulimit -a
+            cat /proc/sys/kernel/yama/ptrace_scope || true
+            cat /proc/sys/kernel/randomize_va_space || true
+            df -h
+            free -h
+          } 2>&1 | tee results/host.log
+
+      - name: '02 - Install native dependencies'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential binutils clang-16 llvm-16 llvm-16-dev lld-16 \
+            cmake ninja-build git gdb python3 python3-pip python3-venv \
+            python3-dev pkg-config libunwind-dev libelf-dev libdw-dev \
+            libzstd-dev libssl-dev zlib1g-dev curl file
+          {
+            gcc --version
+            clang-16 --version
+            llvm-config-16 --version
+            cmake --version
+            ninja --version
+            gdb --version
+            python3 --version
+          } 2>&1 | tee results/native-toolchain.log
+
+      - name: '03 - Create persistent Python environment and install modules'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$GITHUB_WORKSPACE/.venv"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install \
+            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver requests
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip check
+          "$GITHUB_WORKSPACE/.venv/bin/python" - <<'PY'
+          import sys
+          import sympy, numpy, scipy, networkx, yaml, pytest, z3, requests
+          from sympy import Q
+          print('PYTHON_EXECUTABLE=', sys.executable)
+          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3, requests):
+              print('IMPORT_OK=', mod.__name__, getattr(mod, '__version__', 'unknown'))
+          assert Q.positive(3) is not None
+          print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
+          PY
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
+
+      - name: '04 - Clone official QuickSafe recursively'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive "$QS_REPO" QuickSafe 2>&1 | tee results/clone.log
+          cd QuickSafe
+          git checkout "$QS_REF"
+          git submodule update --init --recursive 2>&1 | tee ../results/submodules.log
+          {
+            git rev-parse HEAD
+            git status --short
+            git submodule status --recursive
+            find quicksafe -maxdepth 3 -type f | sort | head -200
+          } 2>&1 | tee ../results/source-inventory.log
+
+      - name: '05 - Validate QuickSafe imports and CLI before building'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 - <<'PY'
+          import sys
+          from sympy import Q
+          print('PYTHON=', sys.executable)
+          print('SYMPY_Q=', Q.positive(3))
+          assert '/.venv/bin/' in sys.executable, 'Workflow is not using its venv'
+          PY
+          cd QuickSafe/quicksafe
+          python3 - <<'PY'
+          from infra import Setup
+          import infra.infra as actual_infra
+          import requests
+          print('QUICKSAFE_SETUP_IMPORT=PASS')
+          print('SETUP=', Setup)
+          print('QUICKSAFE_INFRA_PATH=', actual_infra.__file__)
+          print('REQUESTS_VERSION=', requests.__version__)
+          PY
+          python3 setup.py --help 2>&1 | tee ../../results/setup-help.log
+          python3 setup.py build --help 2>&1 | tee ../../results/build-help.log
+          python3 setup.py run --help 2>&1 | tee ../../results/run-help.log
+          grep -R -n -E 'qs-detection-mode|qs-mem-prot-mode|qs-track-accesses' instances packages 2>/dev/null \
+            | head -100 > ../../results/quick-options.log || true
+
+      - name: '06 - Build standalone guard-page control binary'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > guard_control.c <<'C'
+          #define _GNU_SOURCE
+          #include <errno.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/mman.h>
+          #include <unistd.h>
+
+          __attribute__((noinline)) unsigned char monitored_read(volatile unsigned char *p) {
+              return *p;
+          }
+
+          int main(int argc, char **argv) {
+              setvbuf(stdout, NULL, _IONBF, 0);
+              if (argc != 3) return 10;
+              int strict = !strcmp(argv[1], "strict");
+              if (!strict && strcmp(argv[1], "weak")) return 11;
+              char *end = NULL;
+              errno = 0;
+              unsigned long offset = strtoul(argv[2], &end, 10);
+              if (errno || end == argv[2] || *end) return 12;
+              long ps = sysconf(_SC_PAGESIZE);
+              if (ps <= 0) return 13;
+              size_t page = (size_t)ps;
+              if (page > (size_t)-1 / 3) return 14;
+              size_t total = page * 3;
+              unsigned char *base = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+              if (base == MAP_FAILED) return 15;
+              base[0] = 0x11;
+              base[2 * page] = 0x42;
+              if (mprotect(base + page, page, PROT_NONE)) return 16;
+              printf("PAGE_SIZE=%zu\n", page);
+              printf("OBJECT_BASE=%p\n", (void *)base);
+              printf("OBJECT_END=%p\n", (void *)(base + page));
+              printf("GUARD_START=%p\n", (void *)(base + page));
+              printf("GUARD_END=%p\n", (void *)(base + 2 * page));
+              printf("THIRD_PAGE=%p\n", (void *)(base + 2 * page));
+              printf("OFFSET=%lu\n", offset);
+              printf("POLICY=%s\n", strict ? "STRICT" : "WEAK");
+              if (offset >= total) { puts("RESULT=INVALID"); return 17; }
+              if (strict && offset >= page) {
+                  puts("BOUNDS=REJECT"); puts("RESULT=BLOCKED"); return 2;
+              }
+              puts("BOUNDS=ALLOW");
+              volatile unsigned char *p = base + offset;
+              printf("DEREFERENCE_TARGET=%p\n", (void *)p);
+              puts("DEREFERENCE_BEGIN");
+              unsigned char value = monitored_read(p);
+              printf("READ_COMPLETED=0x%02x\n", value);
+              puts("RESULT=READ_OK");
+              return 0;
+          }
+          C
+          gcc -O0 -g3 -Wall -Wextra -fno-inline -fno-omit-frame-pointer \
+            -o guard_control guard_control.c
+          file guard_control | tee results/control-binary.log
+          objdump -d -M intel guard_control > results/control-disassembly.log
+
+      - name: '07 - Execute six GDB-instrumented control cases'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > monitor.py <<'PY'
+          import json
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          out = pathlib.Path('results')
+          cases = [('strict', 0, 'READ'), ('strict', 4096, 'BLOCKED'),
+                   ('strict', 8192, 'BLOCKED'), ('weak', 0, 'READ'),
+                   ('weak', 4096, 'FAULT'), ('weak', 8192, 'FLAG')]
+          results = []
+          for mode, offset, expected in cases:
+              name = f'{mode}_{offset}'
+              print('=' * 80, flush=True)
+              print(f'CASE={name} EXPECTED={expected}', flush=True)
+              script = f'''set pagination off
+          set confirm off
+          set disable-randomization off
+          break monitored_read
+          commands
+            silent
+            printf "GDB_DEREFERENCE_ENTERED=1\\n"
+            printf "GDB_POINTER=%p\\n", p
+            continue
+          end
+          run {mode} {offset}
+          info program
+          '''
+              path = out / f'{name}.gdb'
+              path.write_text(script)
+              proc = subprocess.run(['gdb', '-q', '-batch', '-x', str(path), './guard_control'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=45, check=False)
+              text = proc.stdout
+              (out / f'{name}.log').write_text(text)
+              print(text, flush=True)
+              def addr(label):
+                  m = re.search(rf'^{label}=(0x[0-9a-fA-F]+)$', text, re.M)
+                  return int(m.group(1), 16) if m else None
+              ptr, base, end, guard_end = map(addr, ('GDB_POINTER', 'OBJECT_BASE',
+                                                      'OBJECT_END', 'GUARD_END'))
+              entered = 'GDB_DEREFERENCE_ENTERED=1' in text
+              completed = 'RESULT=READ_OK' in text
+              blocked = 'RESULT=BLOCKED' in text
+              fault = 'Program received signal SIGSEGV' in text
+              outside = all(x is not None for x in (ptr, base, end)) and not base <= ptr < end
+              beyond = ptr is not None and guard_end is not None and ptr >= guard_end
+              if blocked and not entered and not completed:
+                  actual = 'BLOCKED'
+              elif entered and fault and not completed:
+                  actual = 'FAULT'
+              elif entered and completed:
+                  actual = 'FLAG' if outside and beyond else 'READ'
+              else:
+                  actual = 'UNKNOWN'
+              result = dict(case=name, expected=expected, actual=actual,
+                            passed=actual == expected, entered=entered,
+                            completed=completed, fault=fault, outside=outside,
+                            beyond=beyond, gdb_exit=proc.returncode)
+              results.append(result)
+              print('CASE_RESULT=' + json.dumps(result), flush=True)
+          summary = dict(experiment='UNPROTECTED_CONTROL_NOT_QUICKSAFE',
+                         passed=sum(r['passed'] for r in results),
+                         failed=sum(not r['passed'] for r in results), results=results)
+          (out / 'guard-summary.json').write_text(json.dumps(summary, indent=2))
+          print('FINAL_CONTROL_SUMMARY=' + json.dumps(summary, indent=2))
+          sys.exit(1 if summary['failed'] else 0)
+          PY
+          python3 monitor.py 2>&1 | tee results/control-console.log
+
+      - name: '08 - Build actual QuickSafe LibCalls instance'
+        id: quicksafe_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd QuickSafe/quicksafe
+          echo 'BUILD_COMMAND=python3 setup.py build LibCalls QuickSafe' | tee ../../results/build-command.log
+          set +e
+          timeout 5400 python3 setup.py build LibCalls QuickSafe \
+            2>&1 | tee ../../results/quicksafe-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "$rc" > ../../results/quicksafe-build.exit
+          echo "QUICKSAFE_BUILD_EXIT=$rc"
+          exit "$rc"
+
+      - name: '09 - Inspect genuine QuickSafe artifacts'
+        if: steps.quicksafe_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            find QuickSafe/quicksafe -type f \
+              \( -name '*.so' -o -name '*.bc' -o -name '*.ll' -o -name 'libcalls' \) \
+              -print | head -250
+          } 2>&1 | tee results/quicksafe-artifacts.log
+
+      - name: '10 - Run actual QuickSafe LibCalls instance'
+        id: quicksafe_run
+        if: steps.quicksafe_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd QuickSafe/quicksafe
+          set +e
+          timeout 600 python3 setup.py run LibCalls QuickSafe \
+            2>&1 | tee ../../results/quicksafe-run.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "$rc" > ../../results/quicksafe-run.exit
+          echo "QUICKSAFE_RUN_EXIT=$rc"
+          exit "$rc"
+
+      - name: '11 - Publish unambiguous verdict'
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          out = Path('results')
+          def exit_code(name):
+              p = out / name
+              return int(p.read_text().strip()) if p.exists() else None
+          p = out / 'guard-summary.json'
+          control = json.loads(p.read_text()) if p.exists() else {}
+          report = {
+              'control_passed': control.get('passed') == 6 and control.get('failed') == 0,
+              'official_quicksafe_build_exit': exit_code('quicksafe-build.exit'),
+              'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
+              'quicksafe_guard_bypass_tested': False,
+              'quicksafe_vulnerability_confirmed': False,
+              'note': 'The six GDB tests use a separate, unprotected control target. '
+                      'Building/running LibCalls does not test a QuickSafe guard-page bypass.'
+          }
+          (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('# QuickSafe research\n\n')
+              for key, value in report.items():
+                  f.write(f'- **{key}:** {value}\n')
+          PY
+
+      - name: '12 - Upload diagnostic artifacts'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicksafe-ultraverbose-fixed
+          path: |
+            results/
+            guard_control.c
+            monitor.py
+          if-no-files-found: warn
+          retention-days: 14
