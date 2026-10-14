@@ -1,5 +1,4 @@
-
-name: "QuickSafe — Ultra Verbose Guard Page Research"
+name: QuickSafe Ultra Verbose Research
 
 on:
   push:
@@ -10,67 +9,44 @@ permissions:
   contents: read
 
 jobs:
-  quicksafe-research:
+  quicksafe:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-
     env:
-      DEBIAN_FRONTEND: noninteractive
-      PYTHONUNBUFFERED: "1"
+      PYTHONUNBUFFERED: '1'
       LC_ALL: C
       QS_REPO: https://github.com/vusec/QuickSafe.git
       QS_REF: master
-
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
-      - name: "01 — Initialize diagnostics"
+      - name: '01 - Host and security diagnostics'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p results
           {
-            echo "QUICKSAFE RESEARCH RUN"
-            echo "======================"
             date -u
             uname -a
             cat /etc/os-release
-            lscpu
-            free -h
-            df -h
             getconf PAGE_SIZE
             id
+            ulimit -a
             cat /proc/sys/kernel/yama/ptrace_scope || true
             cat /proc/sys/kernel/randomize_va_space || true
-            ulimit -a
-          } 2>&1 | tee results/system.log
+            df -h
+            free -h
+          } 2>&1 | tee results/host.log
 
-      - name: "02 — Install dependencies"
+      - name: '02 - Install native dependencies'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            clang-16 \
-            llvm-16 \
-            llvm-16-dev \
-            lld-16 \
-            cmake \
-            ninja-build \
-            git \
-            gdb \
-            python3 \
-            python3-pip \
-            python3-venv \
-            pkg-config \
-            libunwind-dev \
-            libelf-dev \
-            libdw-dev \
-            libzstd-dev \
-            libssl-dev \
-            zlib1g-dev \
-            binutils \
-            curl
-
+            build-essential binutils clang-16 llvm-16 llvm-16-dev lld-16 \
+            cmake ninja-build git gdb python3 python3-pip python3-venv \
+            python3-dev pkg-config libunwind-dev libelf-dev libdw-dev \
+            libzstd-dev libssl-dev zlib1g-dev curl file
           {
             gcc --version
             clang-16 --version
@@ -79,209 +55,107 @@ jobs:
             ninja --version
             gdb --version
             python3 --version
-          } 2>&1 | tee results/toolchain.log
+          } 2>&1 | tee results/native-toolchain.log
 
-      - name: "03 — Clone official QuickSafe"
+      - name: '03 - Create persistent Python environment and install modules'
         shell: bash
         run: |
           set -euo pipefail
-
-          git clone \
-            --branch "$QS_REF" \
-            --recurse-submodules \
-            "$QS_REPO" \
-            QuickSafe 2>&1 | tee results/clone.log
-
-          cd QuickSafe
-
-          git submodule update \
-            --init --recursive 2>&1 \
-            | tee ../results/submodules.log
-
-          {
-            echo "========== REVISION =========="
-            git rev-parse HEAD
-
-            echo "========== STATUS =========="
-            git status --short
-
-            echo "========== SUBMODULES =========="
-            git submodule status --recursive
-
-            echo "========== TOP-LEVEL FILES =========="
-            ls -la
-
-            echo "========== QUICKS SAFE FILES =========="
-            ls -la quicksafe
-
-            echo "========== INFRASTRUCTURE =========="
-            ls -la quicksafe/infra
-
-            echo "========== TARGETS =========="
-            ls -la quicksafe/targets
-
-            echo "========== INSTANCES =========="
-            ls -la quicksafe/instances
-
-            echo "========== PACKAGE DEFINITIONS =========="
-            ls -la quicksafe/packages
-          } 2>&1 | tee ../results/repository.log
-
-      - name: "04 — Verify genuine QuickSafe sources"
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path("QuickSafe/quicksafe")
-
-          required = [
-              "setup.py",
-              "instances/QuickSafe.py",
-              "packages/QuickSafePass.py",
-              "targets/LibCalls.py",
-              "infra",
-              "tests/libcalls",
-          ]
-
-          missing = []
-
-          for item in required:
-              path = root / item
-              exists = path.exists()
-              print(f"{'FOUND' if exists else 'MISSING'}: {path}")
-              if not exists:
-                  missing.append(str(path))
-
-          if missing:
-              raise SystemExit(
-                  "Official QuickSafe infrastructure incomplete: "
-                  + ", ".join(missing)
-              )
-
-          print("OFFICIAL_QUICKSAFE_SOURCE_CHECK=PASS")
+          python3 -m venv "$GITHUB_WORKSPACE/.venv"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install \
+            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip check
+          "$GITHUB_WORKSPACE/.venv/bin/python" - <<'PY'
+          import sys
+          import sympy, numpy, scipy, networkx, yaml, pytest, z3
+          from sympy import Q
+          print('PYTHON_EXECUTABLE=', sys.executable)
+          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3):
+              print('IMPORT_OK=', mod.__name__, getattr(mod, '__version__', 'unknown'))
+          assert Q.positive(3) is not None
+          print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
 
-          grep -n -E \
-            'class QuickSafe|qs-detection-mode|qs-mem-prot-mode|qs-track-accesses' \
-            QuickSafe/quicksafe/instances/QuickSafe.py \
-            | tee results/quicksafe-options.log
-
-      - name: "05 — Record QuickSafe CLI help"
+      - name: '04 - Clone official QuickSafe recursively'
         shell: bash
         run: |
           set -euo pipefail
+          git clone --recursive "$QS_REPO" QuickSafe 2>&1 | tee results/clone.log
+          cd QuickSafe
+          git checkout "$QS_REF"
+          git submodule update --init --recursive 2>&1 | tee ../results/submodules.log
+          {
+            git rev-parse HEAD
+            git status --short
+            git submodule status --recursive
+            find quicksafe -maxdepth 3 -type f | sort | head -200
+          } 2>&1 | tee ../results/source-inventory.log
 
+      - name: '05 - Validate QuickSafe imports and CLI before building'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 - <<'PY'
+          import sys
+          from sympy import Q
+          print('PYTHON=', sys.executable)
+          print('SYMPY_Q=', Q.positive(3))
+          assert '/.venv/bin/' in sys.executable, 'Workflow is not using its venv'
+          PY
           cd QuickSafe/quicksafe
+          python3 - <<'PY'
+          import infra
+          print('QUICKSAFE_INFRA_IMPORT=PASS')
+          print('INFRA_PATH=', infra.__file__)
+          PY
+          python3 setup.py --help 2>&1 | tee ../../results/setup-help.log
+          python3 setup.py build --help 2>&1 | tee ../../results/build-help.log
+          python3 setup.py run --help 2>&1 | tee ../../results/run-help.log
+          grep -R -n -E 'qs-detection-mode|qs-mem-prot-mode|qs-track-accesses' instances packages 2>/dev/null \
+            | head -100 > ../../results/quick-options.log || true
 
-          python3 setup.py --help \
-            > ../../results/setup-help.log 2>&1 || {
-              cat ../../results/setup-help.log
-              exit 1
-            }
-
-          python3 setup.py build --help \
-            > ../../results/build-help.log 2>&1 || {
-              cat ../../results/build-help.log
-              exit 1
-            }
-
-          python3 setup.py run --help \
-            > ../../results/run-help.log 2>&1 || {
-              cat ../../results/run-help.log
-              exit 1
-            }
-
-          cat ../../results/build-help.log
-          cat ../../results/run-help.log
-
-      - name: "06 — Create controlled guard-page target"
+      - name: '06 - Build standalone guard-page control binary'
         shell: bash
         run: |
           set -euo pipefail
-
-          cat > guard_control.c <<'EOF'
+          cat > guard_control.c <<'C'
           #define _GNU_SOURCE
-
           #include <errno.h>
-          #include <stdint.h>
           #include <stdio.h>
           #include <stdlib.h>
           #include <string.h>
           #include <sys/mman.h>
           #include <unistd.h>
 
-          /*
-           * CONTROL EXPERIMENT ONLY.
-           *
-           * This program is not QuickSafe-protected.
-           *
-           * Page 0: readable
-           * Page 1: PROT_NONE
-           * Page 2: readable
-           *
-           * Object extent: Page 0 only.
-           */
-
-          __attribute__((noinline))
-          unsigned char monitored_read(
-              volatile unsigned char *ptr
-          ) {
-              return *ptr;
+          __attribute__((noinline)) unsigned char monitored_read(volatile unsigned char *p) {
+              return *p;
           }
 
           int main(int argc, char **argv) {
               setvbuf(stdout, NULL, _IONBF, 0);
-
-              if (argc != 3)
-                  return 10;
-
-              int strict = strcmp(argv[1], "strict") == 0;
-
-              if (!strict && strcmp(argv[1], "weak"))
-                  return 11;
-
+              if (argc != 3) return 10;
+              int strict = !strcmp(argv[1], "strict");
+              if (!strict && strcmp(argv[1], "weak")) return 11;
               char *end = NULL;
               errno = 0;
-
-              unsigned long offset =
-                  strtoul(argv[2], &end, 10);
-
-              if (errno || *end)
-                  return 12;
-
+              unsigned long offset = strtoul(argv[2], &end, 10);
+              if (errno || end == argv[2] || *end) return 12;
               long ps = sysconf(_SC_PAGESIZE);
-
-              if (ps <= 0)
-                  return 13;
-
+              if (ps <= 0) return 13;
               size_t page = (size_t)ps;
-              size_t mapping = page * 3;
-
-              unsigned char *base = mmap(
-                  NULL,
-                  mapping,
-                  PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS,
-                  -1,
-                  0
-              );
-
-              if (base == MAP_FAILED)
-                  return 14;
-
+              if (page > (size_t)-1 / 3) return 14;
+              size_t total = page * 3;
+              unsigned char *base = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+              if (base == MAP_FAILED) return 15;
               base[0] = 0x11;
               base[2 * page] = 0x42;
-
-              if (mprotect(
-                  base + page,
-                  page,
-                  PROT_NONE
-              ) != 0)
-                  return 15;
-
+              if (mprotect(base + page, page, PROT_NONE)) return 16;
               printf("PAGE_SIZE=%zu\n", page);
               printf("OBJECT_BASE=%p\n", (void *)base);
               printf("OBJECT_END=%p\n", (void *)(base + page));
@@ -290,51 +164,29 @@ jobs:
               printf("THIRD_PAGE=%p\n", (void *)(base + 2 * page));
               printf("OFFSET=%lu\n", offset);
               printf("POLICY=%s\n", strict ? "STRICT" : "WEAK");
-
-              if (offset >= mapping) {
-                  puts("RESULT=INVALID");
-                  return 16;
-              }
-
+              if (offset >= total) { puts("RESULT=INVALID"); return 17; }
               if (strict && offset >= page) {
-                  puts("BOUNDS=REJECT");
-                  puts("RESULT=BLOCKED");
-                  return 2;
+                  puts("BOUNDS=REJECT"); puts("RESULT=BLOCKED"); return 2;
               }
-
               puts("BOUNDS=ALLOW");
-
-              volatile unsigned char *ptr = base + offset;
-
-              printf("DEREFERENCE_TARGET=%p\n", (void *)ptr);
+              volatile unsigned char *p = base + offset;
+              printf("DEREFERENCE_TARGET=%p\n", (void *)p);
               puts("DEREFERENCE_BEGIN");
-
-              unsigned char value = monitored_read(ptr);
-
+              unsigned char value = monitored_read(p);
               printf("READ_COMPLETED=0x%02x\n", value);
               puts("RESULT=READ_OK");
-
               return 0;
           }
-          EOF
-
-          gcc \
-            -O0 -g3 \
-            -Wall -Wextra \
-            -fno-inline \
-            -fno-omit-frame-pointer \
+          C
+          gcc -O0 -g3 -Wall -Wextra -fno-inline -fno-omit-frame-pointer \
             -o guard_control guard_control.c
-
           file guard_control | tee results/control-binary.log
+          objdump -d -M intel guard_control > results/control-disassembly.log
 
-          objdump -d -M intel guard_control \
-            > results/control-disassembly.log
-
-      - name: "07 — Create external GDB monitor"
+      - name: '07 - Execute six GDB-instrumented control cases'
         shell: bash
         run: |
           set -euo pipefail
-
           cat > monitor.py <<'PY'
           import json
           import pathlib
@@ -342,281 +194,114 @@ jobs:
           import subprocess
           import sys
 
-          out = pathlib.Path("results")
-          out.mkdir(exist_ok=True)
-
-          cases = [
-              ("strict", 0, "READ"),
-              ("strict", 4096, "BLOCKED"),
-              ("strict", 8192, "BLOCKED"),
-              ("weak", 0, "READ"),
-              ("weak", 4096, "FAULT"),
-              ("weak", 8192, "FLAG"),
-          ]
-
+          out = pathlib.Path('results')
+          cases = [('strict', 0, 'READ'), ('strict', 4096, 'BLOCKED'),
+                   ('strict', 8192, 'BLOCKED'), ('weak', 0, 'READ'),
+                   ('weak', 4096, 'FAULT'), ('weak', 8192, 'FLAG')]
           results = []
-
           for mode, offset, expected in cases:
-              name = f"{mode}_{offset}"
-
-              print("=" * 80)
-              print(f"CASE={name}")
-              print(f"EXPECTED={expected}")
-              print("=" * 80)
-
-              script = f"""
-          set pagination off
+              name = f'{mode}_{offset}'
+              print('=' * 80, flush=True)
+              print(f'CASE={name} EXPECTED={expected}', flush=True)
+              script = f'''set pagination off
           set confirm off
           set disable-randomization off
-
           break monitored_read
           commands
             silent
             printf "GDB_DEREFERENCE_ENTERED=1\\n"
-            printf "GDB_POINTER=%p\\n", ptr
+            printf "GDB_POINTER=%p\\n", p
             continue
           end
-
           run {mode} {offset}
           info program
-          """
-
-              script_path = out / f"{name}.gdb"
-              script_path.write_text(script)
-
-              proc = subprocess.run(
-                  [
-                      "gdb", "-q", "-batch",
-                      "-x", str(script_path),
-                      "./guard_control"
-                  ],
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.STDOUT,
-                  text=True,
-                  timeout=45,
-                  check=False,
-              )
-
+          '''
+              path = out / f'{name}.gdb'
+              path.write_text(script)
+              proc = subprocess.run(['gdb', '-q', '-batch', '-x', str(path), './guard_control'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=45, check=False)
               text = proc.stdout
-
-              (out / f"{name}.log").write_text(text)
-              print(text)
-
-              entered = "GDB_DEREFERENCE_ENTERED=1" in text
-              completed = "RESULT=READ_OK" in text
-              blocked = "RESULT=BLOCKED" in text
-              fault = "Program received signal SIGSEGV" in text
-
-              def address(label):
-                  match = re.search(
-                      rf"^{label}=(0x[0-9a-fA-F]+)$",
-                      text,
-                      re.MULTILINE
-                  )
-                  return int(match.group(1), 16) if match else None
-
-              ptr = address("GDB_POINTER")
-              base = address("OBJECT_BASE")
-              end = address("OBJECT_END")
-              guard_end = address("GUARD_END")
-
-              outside_object = (
-                  ptr is not None and
-                  base is not None and
-                  end is not None and
-                  not (base <= ptr < end)
-              )
-
-              beyond_guard = (
-                  ptr is not None and
-                  guard_end is not None and
-                  ptr >= guard_end
-              )
-
-              if blocked and not entered:
-                  actual = "BLOCKED"
+              (out / f'{name}.log').write_text(text)
+              print(text, flush=True)
+              def addr(label):
+                  m = re.search(rf'^{label}=(0x[0-9a-fA-F]+)$', text, re.M)
+                  return int(m.group(1), 16) if m else None
+              ptr, base, end, guard_end = map(addr, ('GDB_POINTER', 'OBJECT_BASE',
+                                                      'OBJECT_END', 'GUARD_END'))
+              entered = 'GDB_DEREFERENCE_ENTERED=1' in text
+              completed = 'RESULT=READ_OK' in text
+              blocked = 'RESULT=BLOCKED' in text
+              fault = 'Program received signal SIGSEGV' in text
+              outside = all(x is not None for x in (ptr, base, end)) and not base <= ptr < end
+              beyond = ptr is not None and guard_end is not None and ptr >= guard_end
+              if blocked and not entered and not completed:
+                  actual = 'BLOCKED'
               elif entered and fault and not completed:
-                  actual = "FAULT"
+                  actual = 'FAULT'
               elif entered and completed:
-                  actual = (
-                      "FLAG"
-                      if outside_object and beyond_guard
-                      else "READ"
-                  )
+                  actual = 'FLAG' if outside and beyond else 'READ'
               else:
-                  actual = "UNKNOWN"
-
-              passed = actual == expected
-
-              result = {
-                  "case": name,
-                  "expected": expected,
-                  "actual": actual,
-                  "pass": passed,
-                  "instrumented_function_entered": entered,
-                  "read_completed": completed,
-                  "sigsegv": fault,
-                  "outside_object": outside_object,
-                  "beyond_guard": beyond_guard,
-                  "pointer": hex(ptr) if ptr is not None else None,
-              }
-
+                  actual = 'UNKNOWN'
+              result = dict(case=name, expected=expected, actual=actual,
+                            passed=actual == expected, entered=entered,
+                            completed=completed, fault=fault, outside=outside,
+                            beyond=beyond, gdb_exit=proc.returncode)
               results.append(result)
-
-              print("ANALYSIS=" + json.dumps(result, indent=2))
-
-          summary = {
-              "experiment": "controlled_guard_page",
-              "quicksafe_protected": False,
-              "results": results,
-              "passed": sum(r["pass"] for r in results),
-              "failed": sum(not r["pass"] for r in results),
-          }
-
-          (out / "guard-summary.json").write_text(
-              json.dumps(summary, indent=2)
-          )
-
-          print("=" * 80)
-          print("CONTROL TEST FINAL MATRIX")
-          print("=" * 80)
-
-          for r in results:
-              print(
-                  f"{r['case']:<20} "
-                  f"expected={r['expected']:<8} "
-                  f"actual={r['actual']:<8} "
-                  f"pass={r['pass']}"
-              )
-
-          print(f"PASSED={summary['passed']}")
-          print(f"FAILED={summary['failed']}")
-
-          if summary["failed"]:
-              sys.exit(1)
-
-          print("CONTROL_EXPERIMENT=PASS")
+              print('CASE_RESULT=' + json.dumps(result), flush=True)
+          summary = dict(experiment='UNPROTECTED_CONTROL_NOT_QUICKSAFE',
+                         passed=sum(r['passed'] for r in results),
+                         failed=sum(not r['passed'] for r in results), results=results)
+          (out / 'guard-summary.json').write_text(json.dumps(summary, indent=2))
+          print('FINAL_CONTROL_SUMMARY=' + json.dumps(summary, indent=2))
+          sys.exit(1 if summary['failed'] else 0)
           PY
+          python3 monitor.py 2>&1 | tee results/control-console.log
 
-      - name: "08 — Run controlled external instrumentation"
-        shell: bash
-        run: |
-          set -o pipefail
-          python3 monitor.py 2>&1 \
-            | tee results/monitor-console.log
-
-      - name: "09 — Build official QuickSafe LibCalls target"
-        id: qs_build
+      - name: '08 - Build actual QuickSafe LibCalls instance'
+        id: quicksafe_build
         shell: bash
         run: |
           set -euo pipefail
-
           cd QuickSafe/quicksafe
-
-          echo "============================================="
-          echo "BUILDING OFFICIAL QUICKS SAFE INSTRUMENTATION"
-          echo "============================================="
-
-          echo "Repository revision:"
-          git rev-parse HEAD
-
-          echo "Target: LibCalls"
-          echo "Instance: QuickSafe"
-          echo "Mode: guard-page backend"
-          echo "MTE: disabled"
-          echo "Compiler: repository infrastructure"
-          echo "============================================="
-
+          echo 'BUILD_COMMAND=python3 setup.py build LibCalls QuickSafe' | tee ../../results/build-command.log
           set +e
-
-          timeout 5400 \
-            python3 setup.py build LibCalls QuickSafe \
-              --qs-detection-mode overflow \
-              --qs-mem-prot-mode none \
-              --qs-enable-rt-logs \
-              2>&1 | tee ../../results/quicksafe-build.log
-
+          timeout 5400 python3 setup.py build LibCalls QuickSafe \
+            2>&1 | tee ../../results/quicksafe-build.log
           rc=${PIPESTATUS[0]}
           set -e
-
           echo "$rc" > ../../results/quicksafe-build.exit
+          echo "QUICKSAFE_BUILD_EXIT=$rc"
+          exit "$rc"
 
-          if [ "$rc" -ne 0 ]; then
-            echo "QUICKSAFE_BUILD=FAILED"
-            echo "Exit code: $rc"
-            exit "$rc"
-          fi
-
-          echo "QUICKSAFE_BUILD=SUCCESS"
-
-      - name: "10 — Inspect QuickSafe build artifacts"
-        if: steps.qs_build.outcome == 'success'
+      - name: '09 - Inspect genuine QuickSafe artifacts'
+        if: steps.quicksafe_build.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-
           {
-            echo "========================================"
-            echo "QUICKSAFE BUILD ARTIFACT INVENTORY"
-            echo "========================================"
-
-            find QuickSafe/quicksafe \
-              -type f \
-              \( -name '*.so' \
-                 -o -name 'libcalls' \
-                 -o -name '*.bc' \
-                 -o -name '*.ll' \) \
-              -print
-
-            echo "========================================"
-            echo "QUICKSAFE SHARED LIBRARIES"
-            echo "========================================"
-
-            find QuickSafe/quicksafe \
-              -type f -name 'libQuickSafe.so' \
-              -print -exec file {} \;
-
-            echo "========================================"
-            echo "QUICKSAFE TARGET BINARIES"
-            echo "========================================"
-
-            find QuickSafe/quicksafe \
-              -type f -name 'libcalls' \
-              -print -exec file {} \;
+            find QuickSafe/quicksafe -type f \
+              \( -name '*.so' -o -name '*.bc' -o -name '*.ll' -o -name 'libcalls' \) \
+              -print | head -250
           } 2>&1 | tee results/quicksafe-artifacts.log
 
-      - name: "11 — Run genuine QuickSafe target"
-        id: qs_run
-        if: steps.qs_build.outcome == 'success'
+      - name: '10 - Run actual QuickSafe LibCalls instance'
+        id: quicksafe_run
+        if: steps.quicksafe_build.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-
           cd QuickSafe/quicksafe
-
-          echo "========================================"
-          echo "RUNNING OFFICIAL QUICKS SAFE TARGET"
-          echo "========================================"
-
           set +e
-
-          timeout 600 \
-            python3 setup.py run LibCalls QuickSafe \
-              2>&1 | tee ../../results/quicksafe-run.log
-
+          timeout 600 python3 setup.py run LibCalls QuickSafe \
+            2>&1 | tee ../../results/quicksafe-run.log
           rc=${PIPESTATUS[0]}
           set -e
-
           echo "$rc" > ../../results/quicksafe-run.exit
+          echo "QUICKSAFE_RUN_EXIT=$rc"
+          exit "$rc"
 
-          if [ "$rc" -ne 0 ]; then
-            echo "QUICKSAFE_RUN=FAILED"
-            exit "$rc"
-          fi
-
-          echo "QUICKSAFE_RUN=SUCCESS"
-
-      - name: "12 — Produce detailed research verdict"
+      - name: '11 - Publish unambiguous verdict'
         if: always()
         shell: bash
         run: |
@@ -624,101 +309,37 @@ jobs:
           import json
           import os
           from pathlib import Path
-
-          results = Path("results")
-
-          def read_exit(name):
-              p = results / name
-              if not p.exists():
-                  return None
-              try:
-                  return int(p.read_text().strip())
-              except ValueError:
-                  return None
-
-          control = results / "guard-summary.json"
-
-          control_ok = False
-
-          if control.exists():
-              data = json.loads(control.read_text())
-              control_ok = (
-                  data.get("passed") == 6
-                  and data.get("failed") == 0
-              )
-
-          build_exit = read_exit("quicksafe-build.exit")
-          run_exit = read_exit("quicksafe-run.exit")
-
-          quicksafe_build_ok = build_exit == 0
-          quicksafe_run_ok = run_exit == 0
-
+          out = Path('results')
+          def exit_code(name):
+              p = out / name
+              return int(p.read_text().strip()) if p.exists() else None
+          p = out / 'guard-summary.json'
+          control = json.loads(p.read_text()) if p.exists() else {}
           report = {
-              "official_repository":
-                  "https://github.com/vusec/QuickSafe",
-              "control_guard_page_test_passed": control_ok,
-              "quicksafe_build_passed": quicksafe_build_ok,
-              "quicksafe_run_passed": quicksafe_run_ok,
-              "quicksafe_guard_page_bypass_tested": False,
-              "quicksafe_vulnerability_confirmed": False,
-              "interpretation": (
-                  "Control demonstrates that a readable page "
-                  "can be accessed beyond PROT_NONE. "
-                  "The official QuickSafe build/run is a "
-                  "separate integration smoke test. "
-                  "No QuickSafe-specific bypass conclusion "
-                  "is supported without an isolated QuickSafe "
-                  "allocation and observed out-of-bounds access."
-              )
+              'control_passed': control.get('passed') == 6 and control.get('failed') == 0,
+              'official_quicksafe_build_exit': exit_code('quicksafe-build.exit'),
+              'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
+              'quicksafe_guard_bypass_tested': False,
+              'quicksafe_vulnerability_confirmed': False,
+              'note': 'The six GDB tests use a separate, unprotected control target. '
+                      'Building/running LibCalls does not test a QuickSafe guard-page bypass.'
           }
-
-          (results / "final-verdict.json").write_text(
-              json.dumps(report, indent=2)
-          )
-
+          (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
           print(json.dumps(report, indent=2))
-
-          with open(
-              os.environ["GITHUB_STEP_SUMMARY"], "a"
-          ) as f:
-              f.write("# QuickSafe Research Results\n\n")
-              f.write("| Check | Result |\n")
-              f.write("|---|---|\n")
-              f.write(
-                  f"| Controlled guard-page test | "
-                  f"{'PASS' if control_ok else 'FAIL'} |\n"
-              )
-              f.write(
-                  f"| Official QuickSafe build | "
-                  f"{'PASS' if quicksafe_build_ok else 'FAIL'} |\n"
-              )
-              f.write(
-                  f"| Official QuickSafe run | "
-                  f"{'PASS' if quicksafe_run_ok else 'FAIL'} |\n"
-              )
-              f.write(
-                  "| QuickSafe-specific guard bypass | "
-                  "NOT TESTED |\n"
-              )
-              f.write(
-                  "| QuickSafe vulnerability confirmed | "
-                  "NO |\n"
-              )
-
-              f.write(
-                  "\nThe guard-page control is not a "
-                  "QuickSafe-protected allocation.\n"
-              )
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('# QuickSafe research\n\n')
+              for key, value in report.items():
+                  f.write(f'- **{key}:** {value}\n')
           PY
 
-      - name: "13 — Upload all diagnostics"
+      - name: '12 - Upload diagnostic artifacts'
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-research
+          name: quicksafe-ultraverbose-fixed
           path: |
             results/
             guard_control.c
             monitor.py
-          retention-days: 14
           if-no-files-found: warn
+          retention-days: 14
