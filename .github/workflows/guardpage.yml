@@ -1,4 +1,5 @@
-name: Ultra Verbose Guard Page Reachability
+
+name: "QuickSafe — Ultra Verbose Guard Page Research"
 
 on:
   push:
@@ -9,75 +10,202 @@ permissions:
   contents: read
 
 jobs:
-  guard-reachability:
-    name: Guard Page and External Instrumentation
+  quicksafe-research:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 120
 
     env:
+      DEBIAN_FRONTEND: noninteractive
       PYTHONUNBUFFERED: "1"
       LC_ALL: C
+      QS_REPO: https://github.com/vusec/QuickSafe.git
+      QS_REF: master
 
     steps:
-      - name: System information
+      - name: "01 — Initialize diagnostics"
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
+          mkdir -p results
+          {
+            echo "QUICKSAFE RESEARCH RUN"
+            echo "======================"
+            date -u
+            uname -a
+            cat /etc/os-release
+            lscpu
+            free -h
+            df -h
+            getconf PAGE_SIZE
+            id
+            cat /proc/sys/kernel/yama/ptrace_scope || true
+            cat /proc/sys/kernel/randomize_va_space || true
+            ulimit -a
+          } 2>&1 | tee results/system.log
 
-          echo "========================================"
-          echo " SYSTEM INFORMATION"
-          echo "========================================"
-
-          uname -a
-          cat /etc/os-release
-          getconf PAGE_SIZE
-          id
-          pwd
-
-          echo "========================================"
-          echo " PROCESS AND DEBUGGER CONFIGURATION"
-          echo "========================================"
-
-          cat /proc/sys/kernel/yama/ptrace_scope || true
-          cat /proc/sys/kernel/randomize_va_space || true
-          ulimit -a
-
-          echo "========================================"
-          echo " CPU INFORMATION"
-          echo "========================================"
-
-          lscpu || true
-
-      - name: Install dependencies
+      - name: "02 — Install dependencies"
         shell: bash
         run: |
-          set -euxo pipefail
-
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            gcc \
-            binutils \
+            build-essential \
+            clang-16 \
+            llvm-16 \
+            llvm-16-dev \
+            lld-16 \
+            cmake \
+            ninja-build \
+            git \
             gdb \
             python3 \
-            procps \
-            file
+            python3-pip \
+            python3-venv \
+            pkg-config \
+            libunwind-dev \
+            libelf-dev \
+            libdw-dev \
+            libzstd-dev \
+            libssl-dev \
+            zlib1g-dev \
+            binutils \
+            curl
 
-          gcc --version
-          gdb --version
-          python3 --version
+          {
+            gcc --version
+            clang-16 --version
+            llvm-config-16 --version
+            cmake --version
+            ninja --version
+            gdb --version
+            python3 --version
+          } 2>&1 | tee results/toolchain.log
 
-      - name: Create target and external instrumenter
+      - name: "03 — Clone official QuickSafe"
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p results
+          git clone \
+            --branch "$QS_REF" \
+            --recurse-submodules \
+            "$QS_REPO" \
+            QuickSafe 2>&1 | tee results/clone.log
 
-          cat > target.c <<'EOF'
+          cd QuickSafe
+
+          git submodule update \
+            --init --recursive 2>&1 \
+            | tee ../results/submodules.log
+
+          {
+            echo "========== REVISION =========="
+            git rev-parse HEAD
+
+            echo "========== STATUS =========="
+            git status --short
+
+            echo "========== SUBMODULES =========="
+            git submodule status --recursive
+
+            echo "========== TOP-LEVEL FILES =========="
+            ls -la
+
+            echo "========== QUICKS SAFE FILES =========="
+            ls -la quicksafe
+
+            echo "========== INFRASTRUCTURE =========="
+            ls -la quicksafe/infra
+
+            echo "========== TARGETS =========="
+            ls -la quicksafe/targets
+
+            echo "========== INSTANCES =========="
+            ls -la quicksafe/instances
+
+            echo "========== PACKAGE DEFINITIONS =========="
+            ls -la quicksafe/packages
+          } 2>&1 | tee ../results/repository.log
+
+      - name: "04 — Verify genuine QuickSafe sources"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("QuickSafe/quicksafe")
+
+          required = [
+              "setup.py",
+              "instances/QuickSafe.py",
+              "packages/QuickSafePass.py",
+              "targets/LibCalls.py",
+              "infra",
+              "tests/libcalls",
+          ]
+
+          missing = []
+
+          for item in required:
+              path = root / item
+              exists = path.exists()
+              print(f"{'FOUND' if exists else 'MISSING'}: {path}")
+              if not exists:
+                  missing.append(str(path))
+
+          if missing:
+              raise SystemExit(
+                  "Official QuickSafe infrastructure incomplete: "
+                  + ", ".join(missing)
+              )
+
+          print("OFFICIAL_QUICKSAFE_SOURCE_CHECK=PASS")
+          PY
+
+          grep -n -E \
+            'class QuickSafe|qs-detection-mode|qs-mem-prot-mode|qs-track-accesses' \
+            QuickSafe/quicksafe/instances/QuickSafe.py \
+            | tee results/quicksafe-options.log
+
+      - name: "05 — Record QuickSafe CLI help"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd QuickSafe/quicksafe
+
+          python3 setup.py --help \
+            > ../../results/setup-help.log 2>&1 || {
+              cat ../../results/setup-help.log
+              exit 1
+            }
+
+          python3 setup.py build --help \
+            > ../../results/build-help.log 2>&1 || {
+              cat ../../results/build-help.log
+              exit 1
+            }
+
+          python3 setup.py run --help \
+            > ../../results/run-help.log 2>&1 || {
+              cat ../../results/run-help.log
+              exit 1
+            }
+
+          cat ../../results/build-help.log
+          cat ../../results/run-help.log
+
+      - name: "06 — Create controlled guard-page target"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > guard_control.c <<'EOF'
           #define _GNU_SOURCE
 
           #include <errno.h>
-          #include <inttypes.h>
           #include <stdint.h>
           #include <stdio.h>
           #include <stdlib.h>
@@ -86,293 +214,138 @@ jobs:
           #include <unistd.h>
 
           /*
-           * Memory layout:
+           * CONTROL EXPERIMENT ONLY.
            *
-           * Page 0: READ | WRITE
+           * This program is not QuickSafe-protected.
+           *
+           * Page 0: readable
            * Page 1: PROT_NONE
-           * Page 2: READ | WRITE
+           * Page 2: readable
            *
-           * Intended object bounds:
-           *
-           * [Page 0 start, Page 0 end)
-           *
-           * A read into Page 2 is outside the object,
-           * even though Page 2 is readable.
+           * Object extent: Page 0 only.
            */
 
-          volatile unsigned char *watched_address = NULL;
-
-          static void dump_mappings(void *region, size_t size)
-          {
-              FILE *f = fopen("/proc/self/maps", "r");
-
-              if (!f) {
-                  perror("fopen maps");
-                  return;
-              }
-
-              uintptr_t begin = (uintptr_t)region;
-              uintptr_t end = begin + 3 * size;
-
-              char line[1024];
-
-              puts("========== MEMORY MAPS ==========");
-
-              while (fgets(line, sizeof(line), f)) {
-                  unsigned long start = 0;
-                  unsigned long stop = 0;
-
-                  if (sscanf(
-                      line, "%lx-%lx",
-                      &start, &stop
-                  ) == 2) {
-                      if ((uintptr_t)start < end &&
-                          (uintptr_t)stop > begin) {
-                          fputs(line, stdout);
-                      }
-                  }
-              }
-
-              puts("=================================");
-
-              fclose(f);
-          }
-
           __attribute__((noinline))
-          int bounds_check(
-              size_t offset,
-              size_t object_size,
-              size_t mapping_size,
-              int weak
-          )
-          {
-              int allowed;
-
-              if (weak) {
-                  /*
-                   * Deliberately weak policy:
-                   * validates the full mapping,
-                   * not the intended object.
-                   */
-                  allowed = offset < mapping_size;
-              } else {
-                  /*
-                   * Strict policy:
-                   * validates the intended object.
-                   */
-                  allowed = offset < object_size;
-              }
-
-              printf(
-                  "[BOUNDS] mode=%s "
-                  "offset=%zu object_size=%zu "
-                  "mapping_size=%zu decision=%s\n",
-                  weak ? "WEAK" : "STRICT",
-                  offset,
-                  object_size,
-                  mapping_size,
-                  allowed ? "ALLOW" : "REJECT"
-              );
-
-              fflush(stdout);
-
-              return allowed;
+          unsigned char monitored_read(
+              volatile unsigned char *ptr
+          ) {
+              return *ptr;
           }
 
-          __attribute__((noinline))
-          unsigned char read_pointer(
-              volatile unsigned char *p
-          )
-          {
-              /*
-               * GDB places a breakpoint here.
-               *
-               * Reaching this function proves that
-               * control flow passed the bounds check.
-               *
-               * It does not by itself prove that
-               * the memory read completed.
-               */
-              return *p;
-          }
-
-          int main(int argc, char **argv)
-          {
+          int main(int argc, char **argv) {
               setvbuf(stdout, NULL, _IONBF, 0);
 
-              if (argc != 3) {
-                  fprintf(
-                      stderr,
-                      "Usage: %s <strict|weak> <offset>\n",
-                      argv[0]
-                  );
+              if (argc != 3)
                   return 10;
-              }
 
-              int weak;
+              int strict = strcmp(argv[1], "strict") == 0;
 
-              if (strcmp(argv[1], "strict") == 0)
-                  weak = 0;
-              else if (strcmp(argv[1], "weak") == 0)
-                  weak = 1;
-              else
+              if (!strict && strcmp(argv[1], "weak"))
                   return 11;
 
-              char *endptr = NULL;
+              char *end = NULL;
               errno = 0;
 
-              uintmax_t parsed = strtoumax(
-                  argv[2], &endptr, 0
-              );
+              unsigned long offset =
+                  strtoul(argv[2], &end, 10);
 
-              if (errno || endptr == argv[2] ||
-                  *endptr != '\0' ||
-                  parsed > SIZE_MAX) {
-                  fprintf(stderr, "Invalid offset\n");
+              if (errno || *end)
                   return 12;
-              }
 
-              size_t offset = (size_t)parsed;
+              long ps = sysconf(_SC_PAGESIZE);
 
-              long page = sysconf(_SC_PAGESIZE);
-
-              if (page <= 0)
+              if (ps <= 0)
                   return 13;
 
-              size_t size = (size_t)page;
+              size_t page = (size_t)ps;
+              size_t mapping = page * 3;
 
-              if (size > SIZE_MAX / 3)
-                  return 14;
-
-              size_t mapping_size = 3 * size;
-
-              unsigned char *region = mmap(
+              unsigned char *base = mmap(
                   NULL,
-                  mapping_size,
+                  mapping,
                   PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS,
                   -1,
                   0
               );
 
-              if (region == MAP_FAILED) {
-                  perror("mmap");
-                  return 15;
-              }
+              if (base == MAP_FAILED)
+                  return 14;
 
-              region[0] = 0x11;
-              region[2 * size] = 0x42;
+              base[0] = 0x11;
+              base[2 * page] = 0x42;
 
               if (mprotect(
-                  region + size,
-                  size,
+                  base + page,
+                  page,
                   PROT_NONE
-              ) != 0) {
-                  perror("mprotect");
-                  munmap(region, mapping_size);
+              ) != 0)
+                  return 15;
+
+              printf("PAGE_SIZE=%zu\n", page);
+              printf("OBJECT_BASE=%p\n", (void *)base);
+              printf("OBJECT_END=%p\n", (void *)(base + page));
+              printf("GUARD_START=%p\n", (void *)(base + page));
+              printf("GUARD_END=%p\n", (void *)(base + 2 * page));
+              printf("THIRD_PAGE=%p\n", (void *)(base + 2 * page));
+              printf("OFFSET=%lu\n", offset);
+              printf("POLICY=%s\n", strict ? "STRICT" : "WEAK");
+
+              if (offset >= mapping) {
+                  puts("RESULT=INVALID");
                   return 16;
               }
 
-              printf("[SYSTEM] PID=%ld\n", (long)getpid());
-              printf("[SYSTEM] PAGE_SIZE=%zu\n", size);
-
-              printf(
-                  "[LAYOUT] OBJECT_START=%p\n",
-                  (void *)region
-              );
-
-              printf(
-                  "[LAYOUT] OBJECT_END=%p\n",
-                  (void *)(region + size)
-              );
-
-              printf(
-                  "[LAYOUT] GUARD_START=%p\n",
-                  (void *)(region + size)
-              );
-
-              printf(
-                  "[LAYOUT] GUARD_END=%p\n",
-                  (void *)(region + 2 * size)
-              );
-
-              printf(
-                  "[LAYOUT] THIRD_PAGE_START=%p\n",
-                  (void *)(region + 2 * size)
-              );
-
-              printf(
-                  "[LAYOUT] MAPPING_END=%p\n",
-                  (void *)(region + 3 * size)
-              );
-
-              dump_mappings(region, size);
-
-              printf("[TEST] MODE=%s\n",
-                     weak ? "WEAK" : "STRICT");
-
-              printf("[TEST] OFFSET=%zu\n", offset);
-
-              /*
-               * Avoid forming a C pointer outside
-               * the allocated mapping.
-               */
-              if (offset >= mapping_size) {
-                  puts("[RESULT] INVALID_OFFSET");
-                  munmap(region, mapping_size);
-                  return 17;
-              }
-
-              watched_address = region + offset;
-
-              printf(
-                  "[TEST] TARGET_ADDRESS=%p\n",
-                  (void *)watched_address
-              );
-
-              int allowed = bounds_check(
-                  offset,
-                  size,
-                  mapping_size,
-                  weak
-              );
-
-              if (!allowed) {
-                  puts("[RESULT] BLOCKED");
-                  munmap(region, mapping_size);
+              if (strict && offset >= page) {
+                  puts("BOUNDS=REJECT");
+                  puts("RESULT=BLOCKED");
                   return 2;
               }
 
-              puts("[ACCESS] ABOUT_TO_DEREFERENCE");
+              puts("BOUNDS=ALLOW");
 
-              unsigned char value =
-                  read_pointer(watched_address);
+              volatile unsigned char *ptr = base + offset;
 
-              printf(
-                  "[ACCESS] READ_COMPLETED=0x%02x\n",
-                  value
-              );
+              printf("DEREFERENCE_TARGET=%p\n", (void *)ptr);
+              puts("DEREFERENCE_BEGIN");
 
-              puts("[RESULT] READ_OK");
+              unsigned char value = monitored_read(ptr);
 
-              munmap(region, mapping_size);
+              printf("READ_COMPLETED=0x%02x\n", value);
+              puts("RESULT=READ_OK");
+
               return 0;
           }
           EOF
 
+          gcc \
+            -O0 -g3 \
+            -Wall -Wextra \
+            -fno-inline \
+            -fno-omit-frame-pointer \
+            -o guard_control guard_control.c
+
+          file guard_control | tee results/control-binary.log
+
+          objdump -d -M intel guard_control \
+            > results/control-disassembly.log
+
+      - name: "07 — Create external GDB monitor"
+        shell: bash
+        run: |
+          set -euo pipefail
+
           cat > monitor.py <<'PY'
           import json
-          import os
           import pathlib
           import re
           import subprocess
           import sys
-          import time
 
-          RESULTS = pathlib.Path("results")
-          RESULTS.mkdir(exist_ok=True)
+          out = pathlib.Path("results")
+          out.mkdir(exist_ok=True)
 
-          CASES = [
+          cases = [
               ("strict", 0, "READ"),
               ("strict", 4096, "BLOCKED"),
               ("strict", 8192, "BLOCKED"),
@@ -381,392 +354,371 @@ jobs:
               ("weak", 8192, "FLAG"),
           ]
 
-          def banner(message):
-              print()
-              print("=" * 78)
-              print(message)
-              print("=" * 78)
+          results = []
 
-          def parse_address(text, key):
-              match = re.search(
-                  rf"^\[LAYOUT\] {key}=(0x[0-9a-fA-F]+)$",
-                  text,
-                  re.MULTILINE
-              )
-              return int(match.group(1), 16) if match else None
-
-          def run_case(mode, offset, expected):
+          for mode, offset, expected in cases:
               name = f"{mode}_{offset}"
 
-              banner(
-                  f"TEST CASE: {name} | EXPECTED={expected}"
-              )
+              print("=" * 80)
+              print(f"CASE={name}")
+              print(f"EXPECTED={expected}")
+              print("=" * 80)
 
-              gdb_script = f"""
+              script = f"""
           set pagination off
           set confirm off
-          set breakpoint pending off
-          set print pretty on
           set disable-randomization off
 
-          set logging file results/{name}_gdb.log
-          set logging overwrite on
-          set logging enabled on
-
-          printf "GDB_EVENT=SESSION_STARTED\\n"
-
-          break read_pointer
+          break monitored_read
           commands
             silent
-            printf "GDB_EVENT=DEREFERENCE_FUNCTION_ENTERED\\n"
-            printf "GDB_EVENT=EFFECTIVE_ADDRESS=%p\\n", p
-            x/i $pc
+            printf "GDB_DEREFERENCE_ENTERED=1\\n"
+            printf "GDB_POINTER=%p\\n", ptr
             continue
           end
 
           run {mode} {offset}
-
-          printf "GDB_EVENT=INFERIOR_STOPPED\\n"
           info program
           """
 
-              script_path = RESULTS / f"{name}.gdb"
-              script_path.write_text(gdb_script)
+              script_path = out / f"{name}.gdb"
+              script_path.write_text(script)
 
-              command = [
-                  "gdb",
-                  "-q",
-                  "-batch",
-                  "-x",
-                  str(script_path),
-                  "./target",
-              ]
+              proc = subprocess.run(
+                  [
+                      "gdb", "-q", "-batch",
+                      "-x", str(script_path),
+                      "./guard_control"
+                  ],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  text=True,
+                  timeout=45,
+                  check=False,
+              )
 
-              start = time.monotonic()
+              text = proc.stdout
 
-              try:
-                  process = subprocess.run(
-                      command,
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.STDOUT,
-                      text=True,
-                      timeout=45,
-                      check=False,
+              (out / f"{name}.log").write_text(text)
+              print(text)
+
+              entered = "GDB_DEREFERENCE_ENTERED=1" in text
+              completed = "RESULT=READ_OK" in text
+              blocked = "RESULT=BLOCKED" in text
+              fault = "Program received signal SIGSEGV" in text
+
+              def address(label):
+                  match = re.search(
+                      rf"^{label}=(0x[0-9a-fA-F]+)$",
+                      text,
+                      re.MULTILINE
                   )
-              except subprocess.TimeoutExpired:
-                  print("[ERROR] GDB TIMEOUT")
-                  return {
-                      "case": name,
-                      "expected": expected,
-                      "actual": "TIMEOUT",
-                      "pass": False,
-                  }
+                  return int(match.group(1), 16) if match else None
 
-              elapsed = time.monotonic() - start
-              output = process.stdout
+              ptr = address("GDB_POINTER")
+              base = address("OBJECT_BASE")
+              end = address("OBJECT_END")
+              guard_end = address("GUARD_END")
 
-              (RESULTS / f"{name}_output.log").write_text(
-                  output
-              )
-
-              print(output)
-
-              print(f"[MONITOR] GDB_EXIT={process.returncode}")
-              print(f"[MONITOR] ELAPSED={elapsed:.3f}s")
-
-              entered = (
-                  "GDB_EVENT=DEREFERENCE_FUNCTION_ENTERED"
-                  in output
-              )
-
-              blocked = "[RESULT] BLOCKED" in output
-              completed = "[RESULT] READ_OK" in output
-
-              fault = bool(
-                  re.search(
-                      r"Program received signal SIGSEGV",
-                      output
-                  )
-              )
-
-              addresses = re.findall(
-                  r"GDB_EVENT=EFFECTIVE_ADDRESS="
-                  r"(0x[0-9a-fA-F]+)",
-                  output
-              )
-
-              target = parse_address(
-                  output, "THIRD_PAGE_START"
-              )
-
-              guard_start = parse_address(
-                  output, "GUARD_START"
-              )
-
-              guard_end = parse_address(
-                  output, "GUARD_END"
-              )
-
-              object_start = parse_address(
-                  output, "OBJECT_START"
-              )
-
-              object_end = parse_address(
-                  output, "OBJECT_END"
-              )
-
-              effective = (
-                  int(addresses[0], 16)
-                  if addresses else None
+              outside_object = (
+                  ptr is not None and
+                  base is not None and
+                  end is not None and
+                  not (base <= ptr < end)
               )
 
               beyond_guard = (
-                  effective is not None
-                  and guard_end is not None
-                  and effective >= guard_end
+                  ptr is not None and
+                  guard_end is not None and
+                  ptr >= guard_end
               )
 
-              outside_object = (
-                  effective is not None
-                  and object_start is not None
-                  and object_end is not None
-                  and not (
-                      object_start <= effective < object_end
-                  )
-              )
-
-              if blocked and not entered and not completed:
+              if blocked and not entered:
                   actual = "BLOCKED"
-
               elif entered and fault and not completed:
                   actual = "FAULT"
-
               elif entered and completed:
-                  if beyond_guard and outside_object:
-                      actual = "FLAG"
-                  else:
-                      actual = "READ"
-
+                  actual = (
+                      "FLAG"
+                      if outside_object and beyond_guard
+                      else "READ"
+                  )
               else:
                   actual = "UNKNOWN"
 
               passed = actual == expected
 
-              print()
-              print("--------------- ANALYSIS ---------------")
-              print(f"CASE                 : {name}")
-              print(f"MODE                 : {mode}")
-              print(f"OFFSET               : {offset}")
-              print(f"EXPECTED             : {expected}")
-              print(f"ACTUAL               : {actual}")
-              print(f"BOUNDS_BLOCKED       : {blocked}")
-              print(f"DEREFERENCE_ENTERED  : {entered}")
-              print(f"READ_COMPLETED       : {completed}")
-              print(f"SIGSEGV_OBSERVED     : {fault}")
-              print(f"EFFECTIVE_ADDRESS    : {effective}")
-              print(f"GUARD_START          : {guard_start}")
-              print(f"GUARD_END            : {guard_end}")
-              print(f"THIRD_PAGE_START     : {target}")
-              print(f"BEYOND_GUARD         : {beyond_guard}")
-              print(f"OUTSIDE_OBJECT       : {outside_object}")
-              print(f"ASSERTION            : {'PASS' if passed else 'FAIL'}")
-              print("----------------------------------------")
-
-              if actual == "FLAG":
-                  print()
-                  print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                  print(" FLAG: OUT-OF-BOUNDS READ COMPLETED")
-                  print(" TARGET ADDRESS IS BEYOND GUARD PAGE")
-                  print(" EXISTING WEAK CHECK PERMITTED ACCESS")
-                  print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-
-              return {
+              result = {
                   "case": name,
-                  "mode": mode,
-                  "offset": offset,
                   "expected": expected,
                   "actual": actual,
                   "pass": passed,
-                  "bounds_blocked": blocked,
-                  "dereference_entered": entered,
+                  "instrumented_function_entered": entered,
                   "read_completed": completed,
-                  "segfault": fault,
-                  "effective_address": effective,
-                  "beyond_guard": beyond_guard,
+                  "sigsegv": fault,
                   "outside_object": outside_object,
-                  "duration_seconds": round(elapsed, 3),
+                  "beyond_guard": beyond_guard,
+                  "pointer": hex(ptr) if ptr is not None else None,
               }
 
-          def main():
-              banner("EXTERNAL GUARD-PAGE INSTRUMENTATION")
+              results.append(result)
 
-              print("[INFO] Instrumentation: GDB")
-              print("[INFO] Target: compiled ELF executable")
-              print("[INFO] Source modification: none at runtime")
-              print("[INFO] Bounds checks: preserved")
-              print("[INFO] Guard enforcement: Linux mprotect")
-              print("[INFO] Architecture: controlled test harness")
+              print("ANALYSIS=" + json.dumps(result, indent=2))
 
-              results = []
+          summary = {
+              "experiment": "controlled_guard_page",
+              "quicksafe_protected": False,
+              "results": results,
+              "passed": sum(r["pass"] for r in results),
+              "failed": sum(not r["pass"] for r in results),
+          }
 
-              for mode, offset, expected in CASES:
-                  result = run_case(mode, offset, expected)
-                  results.append(result)
+          (out / "guard-summary.json").write_text(
+              json.dumps(summary, indent=2)
+          )
 
-              report = {
-                  "suite": "guard-page-reachability",
-                  "results": results,
-                  "passed": sum(r["pass"] for r in results),
-                  "failed": sum(not r["pass"] for r in results),
-              }
+          print("=" * 80)
+          print("CONTROL TEST FINAL MATRIX")
+          print("=" * 80)
 
-              (RESULTS / "summary.json").write_text(
-                  json.dumps(report, indent=2)
-              )
-
-              banner("FINAL TEST MATRIX")
-
+          for r in results:
               print(
-                  f"{'CASE':<20}"
-                  f"{'EXPECTED':<12}"
-                  f"{'ACTUAL':<12}"
-                  f"{'STATUS':<10}"
+                  f"{r['case']:<20} "
+                  f"expected={r['expected']:<8} "
+                  f"actual={r['actual']:<8} "
+                  f"pass={r['pass']}"
               )
 
-              print("-" * 54)
+          print(f"PASSED={summary['passed']}")
+          print(f"FAILED={summary['failed']}")
 
-              for result in results:
-                  print(
-                      f"{result['case']:<20}"
-                      f"{result['expected']:<12}"
-                      f"{result['actual']:<12}"
-                      f"{'PASS' if result['pass'] else 'FAIL':<10}"
-                  )
+          if summary["failed"]:
+              sys.exit(1)
 
-              banner("FINAL SUMMARY")
-
-              print(f"TOTAL TESTS : {len(results)}")
-              print(f"PASSED      : {report['passed']}")
-              print(f"FAILED      : {report['failed']}")
-
-              if report["failed"]:
-                  print("FINAL RESULT: FAILURE")
-                  return 1
-
-              print("FINAL RESULT: ALL ASSERTIONS PASSED")
-              return 0
-
-          if __name__ == "__main__":
-              sys.exit(main())
+          print("CONTROL_EXPERIMENT=PASS")
           PY
 
-      - name: Compile target with debug symbols
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          gcc \
-            -O0 \
-            -g3 \
-            -Wall \
-            -Wextra \
-            -Wpedantic \
-            -fno-inline \
-            -fno-omit-frame-pointer \
-            -fno-optimize-sibling-calls \
-            -o target \
-            target.c
-
-          echo "========== FILE TYPE =========="
-          file target
-
-          echo "========== ELF HEADER =========="
-          readelf -h target
-
-          echo "========== RELEVANT SYMBOLS =========="
-          nm -an target | grep -E \
-            'bounds_check|read_pointer|watched_address|main'
-
-          echo "========== DISASSEMBLY =========="
-          objdump -d -M intel target \
-            > results/disassembly.txt
-
-          grep -A 35 '<read_pointer>:' \
-            results/disassembly.txt || true
-
-      - name: Execute external instrumentation suite
+      - name: "08 — Run controlled external instrumentation"
         shell: bash
         run: |
           set -o pipefail
+          python3 monitor.py 2>&1 \
+            | tee results/monitor-console.log
 
-          python3 monitor.py \
-            2>&1 | tee results/console.log
-
-      - name: Print machine-readable summary
-        if: always()
+      - name: "09 — Build official QuickSafe LibCalls target"
+        id: qs_build
         shell: bash
         run: |
-          if [ -f results/summary.json ]; then
-            python3 -m json.tool results/summary.json
-          else
-            echo "No summary.json was generated"
+          set -euo pipefail
+
+          cd QuickSafe/quicksafe
+
+          echo "============================================="
+          echo "BUILDING OFFICIAL QUICKS SAFE INSTRUMENTATION"
+          echo "============================================="
+
+          echo "Repository revision:"
+          git rev-parse HEAD
+
+          echo "Target: LibCalls"
+          echo "Instance: QuickSafe"
+          echo "Mode: guard-page backend"
+          echo "MTE: disabled"
+          echo "Compiler: repository infrastructure"
+          echo "============================================="
+
+          set +e
+
+          timeout 5400 \
+            python3 setup.py build LibCalls QuickSafe \
+              --qs-detection-mode overflow \
+              --qs-mem-prot-mode none \
+              --qs-enable-rt-logs \
+              2>&1 | tee ../../results/quicksafe-build.log
+
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "$rc" > ../../results/quicksafe-build.exit
+
+          if [ "$rc" -ne 0 ]; then
+            echo "QUICKSAFE_BUILD=FAILED"
+            echo "Exit code: $rc"
+            exit "$rc"
           fi
 
-      - name: Publish GitHub step summary
+          echo "QUICKSAFE_BUILD=SUCCESS"
+
+      - name: "10 — Inspect QuickSafe build artifacts"
+        if: steps.qs_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "========================================"
+            echo "QUICKSAFE BUILD ARTIFACT INVENTORY"
+            echo "========================================"
+
+            find QuickSafe/quicksafe \
+              -type f \
+              \( -name '*.so' \
+                 -o -name 'libcalls' \
+                 -o -name '*.bc' \
+                 -o -name '*.ll' \) \
+              -print
+
+            echo "========================================"
+            echo "QUICKSAFE SHARED LIBRARIES"
+            echo "========================================"
+
+            find QuickSafe/quicksafe \
+              -type f -name 'libQuickSafe.so' \
+              -print -exec file {} \;
+
+            echo "========================================"
+            echo "QUICKSAFE TARGET BINARIES"
+            echo "========================================"
+
+            find QuickSafe/quicksafe \
+              -type f -name 'libcalls' \
+              -print -exec file {} \;
+          } 2>&1 | tee results/quicksafe-artifacts.log
+
+      - name: "11 — Run genuine QuickSafe target"
+        id: qs_run
+        if: steps.qs_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd QuickSafe/quicksafe
+
+          echo "========================================"
+          echo "RUNNING OFFICIAL QUICKS SAFE TARGET"
+          echo "========================================"
+
+          set +e
+
+          timeout 600 \
+            python3 setup.py run LibCalls QuickSafe \
+              2>&1 | tee ../../results/quicksafe-run.log
+
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "$rc" > ../../results/quicksafe-run.exit
+
+          if [ "$rc" -ne 0 ]; then
+            echo "QUICKSAFE_RUN=FAILED"
+            exit "$rc"
+          fi
+
+          echo "QUICKSAFE_RUN=SUCCESS"
+
+      - name: "12 — Produce detailed research verdict"
         if: always()
         shell: bash
         run: |
           python3 - <<'PY'
           import json
-          import pathlib
           import os
+          from pathlib import Path
 
-          path = pathlib.Path("results/summary.json")
-          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          results = Path("results")
 
-          with summary.open("a") as f:
-              f.write("# Guard Page Reachability\n\n")
+          def read_exit(name):
+              p = results / name
+              if not p.exists():
+                  return None
+              try:
+                  return int(p.read_text().strip())
+              except ValueError:
+                  return None
 
-              if not path.exists():
-                  f.write("Instrumentation did not complete.\n")
-              else:
-                  data = json.loads(path.read_text())
+          control = results / "guard-summary.json"
 
-                  f.write(
-                      "| Case | Expected | Actual | Status |\n"
-                  )
-                  f.write(
-                      "|---|---|---|---|\n"
-                  )
+          control_ok = False
 
-                  for r in data["results"]:
-                      status = (
-                          "PASS" if r["pass"] else "FAIL"
-                      )
+          if control.exists():
+              data = json.loads(control.read_text())
+              control_ok = (
+                  data.get("passed") == 6
+                  and data.get("failed") == 0
+              )
 
-                      f.write(
-                          f"| {r['case']} "
-                          f"| {r['expected']} "
-                          f"| {r['actual']} "
-                          f"| {status} |\n"
-                      )
+          build_exit = read_exit("quicksafe-build.exit")
+          run_exit = read_exit("quicksafe-run.exit")
 
-                  f.write(
-                      f"\n**Passed:** {data['passed']}  \n"
-                  )
-                  f.write(
-                      f"**Failed:** {data['failed']}\n"
-                  )
+          quicksafe_build_ok = build_exit == 0
+          quicksafe_run_ok = run_exit == 0
+
+          report = {
+              "official_repository":
+                  "https://github.com/vusec/QuickSafe",
+              "control_guard_page_test_passed": control_ok,
+              "quicksafe_build_passed": quicksafe_build_ok,
+              "quicksafe_run_passed": quicksafe_run_ok,
+              "quicksafe_guard_page_bypass_tested": False,
+              "quicksafe_vulnerability_confirmed": False,
+              "interpretation": (
+                  "Control demonstrates that a readable page "
+                  "can be accessed beyond PROT_NONE. "
+                  "The official QuickSafe build/run is a "
+                  "separate integration smoke test. "
+                  "No QuickSafe-specific bypass conclusion "
+                  "is supported without an isolated QuickSafe "
+                  "allocation and observed out-of-bounds access."
+              )
+          }
+
+          (results / "final-verdict.json").write_text(
+              json.dumps(report, indent=2)
+          )
+
+          print(json.dumps(report, indent=2))
+
+          with open(
+              os.environ["GITHUB_STEP_SUMMARY"], "a"
+          ) as f:
+              f.write("# QuickSafe Research Results\n\n")
+              f.write("| Check | Result |\n")
+              f.write("|---|---|\n")
+              f.write(
+                  f"| Controlled guard-page test | "
+                  f"{'PASS' if control_ok else 'FAIL'} |\n"
+              )
+              f.write(
+                  f"| Official QuickSafe build | "
+                  f"{'PASS' if quicksafe_build_ok else 'FAIL'} |\n"
+              )
+              f.write(
+                  f"| Official QuickSafe run | "
+                  f"{'PASS' if quicksafe_run_ok else 'FAIL'} |\n"
+              )
+              f.write(
+                  "| QuickSafe-specific guard bypass | "
+                  "NOT TESTED |\n"
+              )
+              f.write(
+                  "| QuickSafe vulnerability confirmed | "
+                  "NO |\n"
+              )
+
+              f.write(
+                  "\nThe guard-page control is not a "
+                  "QuickSafe-protected allocation.\n"
+              )
           PY
 
-      - name: Upload complete diagnostic artifacts
+      - name: "13 — Upload all diagnostics"
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: guard-page-ultra-verbose-results
+          name: quicksafe-ultraverbose-research
           path: |
             results/
-            target.c
+            guard_control.c
             monitor.py
-          if-no-files-found: warn
           retention-days: 14
+          if-no-files-found: warn
