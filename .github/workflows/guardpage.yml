@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v8 - LLVM Toolchain and Honest Build Verification
+name: QuickSafe Ultra Verbose Research v9 - Native Build Diagnostics and Fail-Closed Verification
 
 on:
   push:
@@ -102,7 +102,7 @@ jobs:
           assert Q.positive(3) is not None
           print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
-          echo "WORKFLOW_REVISION=v8-llvm-build-verification" >> "$GITHUB_ENV"
+          echo "WORKFLOW_REVISION=v9-native-build-diagnostics" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -126,7 +126,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'WORKFLOW_REVISION=v8-llvm-build-verification'
+          echo 'WORKFLOW_REVISION=v9-native-build-diagnostics'
           python3 - <<'PYFIX'
           from pathlib import Path
           import ast
@@ -403,7 +403,7 @@ jobs:
           PY
           python3 monitor.py 2>&1 | tee results/control-console.log
 
-      - name: '08 - Build actual QuickSafe LibCalls instance with traceback detection'
+      - name: '08 - Build QuickSafe and capture underlying CMake failure'
         id: quicksafe_build
         shell: bash
         run: |
@@ -416,27 +416,58 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           echo "$rc" > ../../results/quicksafe-build.exit
+          echo '=== CMake diagnostics for QuickSafePass ==='
+          pass_build='build/packages/QuickSafePass/build'
+          if [ -d "$pass_build" ]; then
+            find "$pass_build" -maxdepth 4 -type f \
+              \( -name 'CMakeCache.txt' -o -name 'CMakeError.log' -o -name 'CMakeConfigureLog.yaml' -o -name 'build.ninja' -o -name 'flags.make' -o -name 'link.txt' \) \
+              -print | tee ../../results/quicksafe-cmake-files.log
+            if [ -f "$pass_build/CMakeCache.txt" ]; then
+              grep -E '^(CMAKE_(C|CXX)_COMPILER|CMAKE_MAKE_PROGRAM|LLVM_DIR|CMAKE_BUILD_TYPE):' \
+                "$pass_build/CMakeCache.txt" | tee ../../results/quicksafe-cmake-config.log || true
+            fi
+            # A second direct invocation exposes the command hidden by infra's
+            # abbreviated exception. It runs only if the first build failed.
+            if grep -Eq '\[FTL\]|\[ERR\]|\[FAIL\]|Command execution failed|Command failed|Traceback|Status:[[:space:]]*[1-9]' ../../results/quicksafe-build.log || [ "$rc" -ne 0 ]; then
+              echo '=== Reproduce QuickSafePass failure with full CMake output ==='
+              set +e
+              timeout 300 cmake --build "$pass_build" --parallel 1 --verbose \
+                > ../../results/quicksafe-cmake-reproduction.log 2>&1
+              cmake_rc=$?
+              set -e
+              echo "$cmake_rc" > ../../results/quicksafe-cmake-reproduction.exit
+              cat ../../results/quicksafe-cmake-reproduction.log
+            fi
+          fi
           python3 - <<'PYBUILD'
-          import json
-          import pathlib
-          import re
+          import json, pathlib, re
           root = pathlib.Path('../../results')
           log = (root / 'quicksafe-build.log').read_text(errors='replace')
           rc = int((root / 'quicksafe-build.exit').read_text())
-          patterns = [r'(?m)^Traceback \(most recent call last\):',
-                      r'(?m)^(?:FileNotFoundError|ModuleNotFoundError|ImportError|RuntimeError|OSError|CMake Error|ninja: error|make: \*\*\*)\b',
-                      r'(?m)^unknown error\s*$']
-          matched = [p for p in patterns if re.search(p, log)]
+          patterns = {
+              'infra_fatal': r'\[(?:FTL|ERR|FAIL)\]',
+              'command_failure': r'(?i)Command (?:execution )?failed|Status:\s*[1-9][0-9]*',
+              'python_traceback': r'Traceback \(most recent call last\):|\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\b',
+              'build_system_failure': r'(?i)CMake Error|ninja: (?:error|build stopped)|make(?:\[[0-9]+\])?: \*\*\*|FAILED:',
+          }
+          matched = [name for name, pat in patterns.items() if re.search(pat, log)]
+          install = pathlib.Path('build/packages/QuickSafePass/install')
+          pass_artifacts = sorted(str(p) for p in install.rglob('*') if p.is_file() and
+                                  (p.suffix in {'.so', '.a', '.bc'} or '.so.' in p.name)) if install.exists() else []
+          # libbacktrace alone must never qualify as a QuickSafe build.
+          healthy = rc == 0 and not matched and bool(pass_artifacts)
           result = {'process_exit': rc, 'fatal_patterns': matched,
-                    'build_healthy': rc == 0 and not matched}
+                    'quicksafe_pass_install_exists': install.is_dir(),
+                    'quicksafe_pass_artifacts': pass_artifacts,
+                    'build_healthy': healthy}
           (root / 'quicksafe-build-health.json').write_text(json.dumps(result, indent=2))
           print('QUICKSAFE_BUILD_HEALTH=' + json.dumps(result), flush=True)
-          if not result['build_healthy']:
-              raise SystemExit(1)
+          if not healthy:
+              raise SystemExit('QuickSafe build NOT verified; inspect quicksafe-cmake-reproduction.log')
           PYBUILD
-          echo 'QUICKSAFE_BUILD_CLI_AND_LOG=PASS'
+          echo 'QUICKSAFE_BUILD_VERIFIED=PASS'
 
-      - name: '09 - Inspect genuine QuickSafe artifacts'
+      - name: '09 - Verify QuickSafePass and LibCalls-specific outputs'
         if: steps.quicksafe_build.outcome == 'success'
         id: quicksafe_artifacts
         shell: bash
@@ -445,21 +476,21 @@ jobs:
           python3 - <<'PYART'
           from pathlib import Path
           import json
-          root = Path('QuickSafe/quicksafe')
-          matches = sorted(str(p) for p in root.rglob('*') if p.is_file() and
-                           (p.suffix in {'.so', '.bc', '.ll'} or p.name == 'libcalls'))
-          Path('results/quicksafe-artifacts.log').write_text('\n'.join(matches) + '\n')
-          print('ARTIFACT_COUNT=', len(matches))
-          for item in matches[:250]:
-              print(item)
-          # Inventory alone is not proof of a valid instrumented build.
-          # The run step will additionally check the CLI output for failures.
-          if not matches:
-              print('ERROR: No candidate QuickSafe build artifacts found')
-              raise SystemExit(1)
+          root = Path('QuickSafe/quicksafe/build')
+          installed = root / 'packages/QuickSafePass/install'
+          pass_files = sorted(str(p) for p in installed.rglob('*') if p.is_file() and
+                              (p.suffix in {'.so', '.a', '.bc'} or '.so.' in p.name)) if installed.exists() else []
+          # Inspect all target outputs; do not confuse libbacktrace with LibCalls.
+          target_files = sorted(str(p) for p in (root / 'targets').rglob('*') if p.is_file()) if (root / 'targets').exists() else []
+          report = {'pass_files': pass_files, 'target_files': target_files[:500],
+                    'pass_verified': bool(pass_files), 'target_files_present': bool(target_files)}
+          Path('results/quicksafe-artifacts.json').write_text(json.dumps(report, indent=2))
+          print('QUICKSAFE_ARTIFACTS=' + json.dumps(report, indent=2))
+          if not pass_files or not target_files:
+              raise SystemExit('Missing QuickSafePass installation or built target files')
           PYART
 
-      - name: '10 - Run actual QuickSafe LibCalls instance with traceback detection'
+      - name: '10 - Run QuickSafe LibCalls only after verified build'
         id: quicksafe_run
         if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
         shell: bash
@@ -473,22 +504,24 @@ jobs:
           set -e
           echo "$rc" > ../../results/quicksafe-run.exit
           python3 - <<'PYRUN'
-          import json
-          import pathlib
-          import re
+          import json, pathlib, re
           root = pathlib.Path('../../results')
           log = (root / 'quicksafe-run.log').read_text(errors='replace')
           rc = int((root / 'quicksafe-run.exit').read_text())
-          patterns = [r'(?m)^Traceback \(most recent call last\):',
-                      r'(?m)^(?:FileNotFoundError|ModuleNotFoundError|ImportError|RuntimeError|OSError)\b',
-                      r'(?m)^unknown error\s*$']
-          matched = [p for p in patterns if re.search(p, log)]
-          result = {'process_exit': rc, 'fatal_patterns': matched,
-                    'run_healthy': rc == 0 and not matched}
+          patterns = {
+              'infra_fatal': r'\[(?:FTL|ERR|FAIL)\]',
+              'python_traceback': r'Traceback \(most recent call last\):|\bAssertionError\b',
+              'command_failure': r'(?i)Command (?:execution )?failed|Status:\s*[1-9][0-9]*',
+              'missing_target': r'(?i)does not exist!|No such file or directory',
+          }
+          matched = [name for name, pat in patterns.items() if re.search(pat, log)]
+          healthy = rc == 0 and not matched
+          result = {'process_exit': rc, 'fatal_patterns': matched, 'run_healthy': healthy,
+                    'note': 'CLI and log health only; this is not a guard-page bypass test'}
           (root / 'quicksafe-run-health.json').write_text(json.dumps(result, indent=2))
           print('QUICKSAFE_RUN_HEALTH=' + json.dumps(result), flush=True)
-          if not result['run_healthy']:
-              raise SystemExit(1)
+          if not healthy:
+              raise SystemExit('QuickSafe runtime failed; see quicksafe-run.log')
           PYRUN
           echo 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'
 
@@ -512,7 +545,7 @@ jobs:
           report = {
               'control_passed': control.get('passed') == 6 and control.get('failed') == 0,
               'official_quicksafe_build_exit': exit_code('quicksafe-build.exit'),
-              'official_quicksafe_build_verified': health('quicksafe-build-health.json', 'build_healthy'),
+              'official_quicksafe_build_verified': health('quicksafe-build-health.json', 'build_healthy') and health('quicksafe-artifacts.json', 'pass_verified') and health('quicksafe-artifacts.json', 'target_files_present'),
               'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
               'official_quicksafe_run_verified': health('quicksafe-run-health.json', 'run_healthy'),
               'quicksafe_guard_bypass_tested': False,
@@ -532,7 +565,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v8
+          name: quicksafe-ultraverbose-v9
           path: |
             results/
             guard_control.c
