@@ -1,4 +1,4 @@
-name: QuickSafe v29 explicit security gate and runtime evidence audit
+name: QuickSafe v30 verified security-gate self-test and explicit verdict
 on:
   push: null
   pull_request: null
@@ -22,7 +22,7 @@ jobs:
       QS_REF: master
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PYTHONPATH: ${{ github.workspace }}/QuickSafe/quicksafe/infra
-      WORKFLOW_REVISION: v29-security-gate
+      WORKFLOW_REVISION: v30-security-gate
     steps:
     - name: 01 - Host and security diagnostics
       shell: bash
@@ -860,7 +860,7 @@ jobs:
       run: "set -euo pipefail\npython3 - <<'PYSUM'\nimport json, pathlib, os\nout=pathlib.Path('results')\nv=json.loads((out/'final-verdict.json').read_text())\n\
         s=json.loads((out/'v29-security-readiness.json').read_text())\nprofile_log=(out/'quicksafe-run.log')\nprofile_text=profile_log.read_text(errors='replace')\
         \ if profile_log.exists() else ''\nprofile_missing=('No raw profiling data found' in profile_text or 'Found 0\
-        \ raw profiling data files' in profile_text)\nreport={\n 'workflow_revision':'v29-security-gate',\n 'execution_complete':v.get('execution_complete'),\n\
+        \ raw profiling data files' in profile_text)\nreport={\n 'workflow_revision':'v30-security-gate',\n 'execution_complete':v.get('execution_complete'),\n\
         \ 'result_status':v.get('result_status'),\n 'security_validation_complete':s.get('security_validation_complete'),\n\
         \ 'security_result':s.get('security_result'),\n 'protected_read_cases':s.get('protected_read_cases'),\n 'protected_write_cases':s.get('protected_write_cases'),\n\
         \ 'read_guard_interval_skips':s.get('read_guard_interval_skips'),\n 'write_guard_interval_skips':s.get('write_guard_interval_skips'),\n\
@@ -878,11 +878,32 @@ jobs:
         \ is not proof of security enforcement. OS `PROT_NONE` faults are not independent QuickSafe enforcement evidence.']\n\
         summary='\\n'.join(lines)+'\\n'\nwith open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write(summary)\nprint(summary)\n\
         PYSUM\n"
+    - name: 11b - Verify fail-closed security gate against actual v29 evidence
+      shell: bash
+      run: "set -euo pipefail\npython3 - <<'PYGATE'\nimport json, pathlib\nout=pathlib.Path('results')\n\
+        r=json.loads((out/'final-verdict.json').read_text())\ns=json.loads((out/'v29-security-readiness.json').read_text())\n\
+        def gate(verdict, readiness, strict):\n    if verdict.get('execution_complete')\
+        \ is not True or verdict.get('missing_evidence'):\n        return False\n    if\
+        \ verdict.get('security_validation_complete') is not readiness.get('security_validation_complete'):\n\
+        \        return False\n    if verdict.get('result_status') != readiness.get('security_result'):\n\
+        \        return False\n    if strict and not (verdict.get('security_validation_complete')\
+        \ is True and readiness.get('runtime_memory_access_enforcement_verified') is True\
+        \ and readiness.get('paired_quicksafe_on_off_positive_control_verified') is True):\n\
+        \        return False\n    return True\nassert gate(r,s,False), 'Diagnostic gate\
+        \ must pass for complete and consistent evidence'\nassert not gate(r,s,True),\
+        \ 'Strict security gate unexpectedly passed without independently verified enforcement'\n\
+        assert not gate({**r,'execution_complete':False},s,False), 'Missing evidence was\
+        \ accepted'\nassert not gate({**r,'result_status':'NO_CONFIRMED_BYPASS_IN_TESTED_CASES'},s,False),\
+        \ 'Contradictory verdict was accepted'\nassert not gate({**r,'security_validation_complete':True},s,False),\
+        \ 'Inconsistent security flags were accepted'\nreport={'revision':'v30-security-gate','diagnostic_gate_pass':True,'strict_security_gate_pass':False,'strict_security_gate_self_test_pass':True,'status':'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED','note':'No\
+        \ real paired QuickSafe-on/off enforcement control exists; strict gate must reject\
+        \ this evidence.'}\n(out/'v30-gate-self-test.json').write_text(json.dumps(report,indent=2)+'\\\
+        n')\nprint('V30_SECURITY_GATE_SELF_TEST='+json.dumps(report,indent=2))\nPYGATE\n"
     - name: 12 - Upload diagnostic artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v29
+        name: quicksafe-ultraverbose-v30
         path: 'results/
 
           guard_control.c
