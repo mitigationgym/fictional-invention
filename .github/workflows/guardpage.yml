@@ -539,6 +539,14 @@ jobs:
                     if (at_next) std::cout << "QS_PAGE_PLUS_ONE_PERMS=" << perms << "\n";
                 }
             }
+            if (getenv("QS_V23_WRITE_OFFSET")) {
+                std::cout << "QS_WRITE_BEGIN=1\n" << std::flush;
+                *reinterpret_cast<volatile unsigned char *>(addr) = 0xA7;
+                std::cout << "QS_WRITE_OK=1\n" << std::flush;
+                volatile unsigned char verify=*reinterpret_cast<volatile unsigned char *>(addr);
+                std::cout << "QS_WRITE_READBACK=" << static_cast<unsigned>(verify) << "\n" << std::flush;
+                _Exit(verify == 0xA7 ? 0 : 81);
+            }
             std::cout << "QS_READ_BEGIN=1\n" << std::flush;
             volatile unsigned char value=*reinterpret_cast<volatile unsigned char *>(addr);
             std::cout << "QS_READ_OK=1\nQS_VALUE=" << static_cast<unsigned>(value) << "\n" << std::flush;
@@ -1192,6 +1200,76 @@ jobs:
             if not x['passed']:print('FAILED_WRITE_CONTROL='+json.dumps(x),flush=True)
           sys.exit(1)
         PYWRITE
+    - name: 10f - Execute real QuickSafe allocation write probes with conservative evidence classification
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PYWRITEPROTECTED'
+        import hashlib,json,os,pathlib,re,subprocess,sys
+        out=pathlib.Path('results'); out.mkdir(exist_ok=True)
+        binary=pathlib.Path('QuickSafe/quicksafe/build/targets/LibCalls/bin/libcalls').resolve()
+        provenance=json.loads((out/'verified-binary-provenance.json').read_text())
+        digest=hashlib.sha256(binary.read_bytes()).hexdigest()
+        if digest!=provenance['sha256_after_instrumented_rebuild']:
+            raise SystemExit('FAIL CLOSED: instrumented binary provenance mismatch')
+        if b'QS_WRITE_BEGIN' not in binary.read_bytes():
+            raise SystemExit('FAIL CLOSED: write fixture absent from actual instrumented binary')
+        pg=os.sysconf('SC_PAGE_SIZE')
+        lib=pathlib.Path('QuickSafe/quicksafe/build/packages/QuickSafePass/install/lib').resolve()
+        backtrace=pathlib.Path('QuickSafe/quicksafe/build/packages/libbacktrace/install/lib').resolve()
+        env=os.environ.copy()
+        env['LD_LIBRARY_PATH']=':'.join([str(lib),str(backtrace),'/usr/lib/llvm-16/lib',env.get('LD_LIBRARY_PATH','')])
+        env['QS_V23_WRITE_OFFSET']='1'
+        offsets={0,1,7,15,31,63,64,65,127,255,511,1023,pg-1,pg,pg+1,pg+16,2*pg,2*pg+64,3*pg,4*pg,8*pg,16*pg,32*pg,64*pg}
+        for boundary in (pg,2*pg,4*pg,8*pg,16*pg,32*pg,64*pg):
+            for delta in (-2,-1,0,1,2,16,64):
+                if boundary+delta>=0:offsets.add(boundary+delta)
+        def marker(log,key):return bool(re.search(r'(?m)^'+re.escape(key)+r'=1$',log))
+        def number(log,key):
+            m=re.search(r'(?m)^'+re.escape(key)+r'=0x([0-9a-fA-F]+)$',log)
+            return int(m[1],16) if m else None
+        rows=[]
+        for offset in sorted(offsets):
+            env['QS_V17_OFFSET']=str(offset)
+            try:
+                proc=subprocess.run([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=20)
+                rc,log=proc.returncode,proc.stdout
+            except subprocess.TimeoutExpired as e:
+                rc,log=None,str(e.stdout or '')+'\nTIMEOUT'
+            logpath=out/f'protected-write-offset-{offset}.log';logpath.write_text(log)
+            base=number(log,'QS_BASE');dst=number(log,'QS_ADDR')
+            maps=[]
+            for m in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\s+([rwxps-]{4})(?:\s|$)',log):
+                maps.append({'start':int(m[1],16),'end':int(m[2],16),'perms':m[3]})
+            srcmap=next((m for m in maps if base is not None and m['start']<=base<m['end']),None)
+            dstmap=next((m for m in maps if dst is not None and m['start']<=dst<m['end']),None)
+            guards=[m for m in maps if base is not None and dst is not None and base<m['start'] and m['end']<=dst and m['perms'].startswith('---')]
+            # Success requires process exit zero, exact marker, and independently printed readback.
+            readback=re.search(r'(?m)^QS_WRITE_READBACK=(\d+)$',log)
+            completed=rc==0 and marker(log,'QS_WRITE_OK') and readback is not None and int(readback[1])==0xA7
+            verified_geometry=bool(srcmap and dstmap and guards and 'w' in dstmap['perms'] and base<guards[0]['start']<guards[0]['end']<=dst)
+            rows.append({'offset':offset,'exit_code':rc,'write_started':marker(log,'QS_WRITE_BEGIN'),
+                         'write_completed_and_readback_verified':completed,'source_address':base,'destination_address':dst,
+                         'source_mapping':srcmap,'destination_mapping':dstmap,'intervening_guard_mappings':guards,
+                         'guard_interval_skip_write_observed':completed and verified_geometry,
+                         'runtime_access_check_verified':False,'log':str(logpath),
+                         'classification':'WRITE_SUCCEEDED' if completed else ('TIMEOUT' if rc is None else ('FAULT' if rc in (-11,-7,123) else 'OTHER_EXIT'))})
+            print('PROTECTED_WRITE='+json.dumps({k:v for k,v in rows[-1].items() if k not in ('source_mapping','destination_mapping','intervening_guard_mappings')}),flush=True)
+        baseline=next((r for r in rows if r['offset']==0),None)
+        report={'experiment':'REAL_QUICKSAFE_TARGETED_ALLOCATION_WRITE_PROBE',
+                'binary_sha256':digest,'selector':provenance['selector'],'cases':rows,
+                'case_count':len(rows),'baseline_write_verified':bool(baseline and baseline['write_completed_and_readback_verified']),
+                'successful_writes':sum(r['write_completed_and_readback_verified'] for r in rows),
+                'faults':sum(r['classification']=='FAULT' for r in rows),
+                'verified_guard_interval_skip_writes':sum(r['guard_interval_skip_write_observed'] for r in rows),
+                'memory_access_enforcement_verified':False,'quicksafe_write_bypass_confirmed':False,
+                'limitations':'Real instrumented LibCalls allocation and dereference, but no proof that QuickSafe instruments/enforces each write access. Destination mappings are incidental and may be absent. Guard skip alone does not prove violation of QuickSafe security policy.'}
+        (out/'protected-write-experiment.json').write_text(json.dumps(report,indent=2))
+        print('PROTECTED_WRITE_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)
+        if not report['baseline_write_verified']:raise SystemExit('FAIL CLOSED: protected in-bounds write/readback baseline failed')
+        if any(r['guard_interval_skip_write_observed'] and not r['write_completed_and_readback_verified'] for r in rows):
+            raise SystemExit('FAIL CLOSED: invalid guard-skip classification')
+        PYWRITEPROTECTED
     - name: 11 - Publish unambiguous verdict
       if: always()
       shell: bash
@@ -1217,7 +1295,14 @@ jobs:
         jump=json.loads(jump_path.read_text()) if jump_path.exists() else {}
         write_path=out/'write-jump'/'summary.json'
         writes=json.loads(write_path.read_text()) if write_path.exists() else {}
+        protected_writes_path=out/'protected-write-experiment.json'
+        protected_writes=json.loads(protected_writes_path.read_text()) if protected_writes_path.exists() else {}
         report = {
+            'actual_quicksafe_protected_write_cases': protected_writes.get('case_count',0),
+            'actual_quicksafe_protected_writes_completed': protected_writes.get('successful_writes',0),
+            'actual_quicksafe_protected_write_guard_skips': protected_writes.get('verified_guard_interval_skip_writes',0),
+            'actual_quicksafe_protected_write_baseline_verified': protected_writes.get('baseline_write_verified',False),
+            'actual_quicksafe_write_access_enforcement_verified': False,
             'write_jump_control_cases': writes.get('total'),
             'write_jump_control_passes': writes.get('passed'),
             'write_jump_control_failures': writes.get('failed'),
@@ -1249,7 +1334,7 @@ jobs:
             'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),
             'object_out_of_bounds_reads_completed': protected.get('object_out_of_bounds_reads_completed'),
             'quicksafe_vulnerability_confirmed': False, # Requires independent enforcement/policy verification beyond address-space evidence.
-            'note': 'Nonzero allocation instrumentation and binary hash provenance do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe outcomes must be evaluated against the observed memory map.'
+            'note': 'v23 adds actual targeted-allocation write probes, but write-access enforcement is not independently established. Nonzero allocation instrumentation and binary hash provenance do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe outcomes must be evaluated against the observed memory map.'
         }
         (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2))
@@ -1262,7 +1347,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v22
+        name: quicksafe-ultraverbose-v23
         path: |
           results/
           guard_control.c
