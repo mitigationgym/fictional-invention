@@ -1,4 +1,4 @@
-name: QuickSafe v26 memory-access enforcement evidence and guard-jump diagnostics
+name: QuickSafe v27 enforcement attribution and guard-jump diagnostics
 on:
   push: null
   pull_request: null
@@ -16,7 +16,7 @@ jobs:
       QS_REF: master
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PYTHONPATH: ${{ github.workspace }}/QuickSafe/quicksafe/infra
-      WORKFLOW_REVISION: v26-enforcement-evidence
+      WORKFLOW_REVISION: v27-enforcement-attribution
     steps:
     - name: 01 - Host and security diagnostics
       shell: bash
@@ -729,6 +729,40 @@ jobs:
         (out/'v26-access-enforcement-evidence.json').write_text(json.dumps(report,indent=2))\nprint('V26_ACCESS_ENFORCEMENT_EVIDENCE='+json.dumps(report,indent=2),flush=True)\n\
         if issues or not hash_ok or not read_baseline or not write_baseline:\n    raise SystemExit('FAIL CLOSED:\
         \ missing provenance or experiment baseline: '+', '.join(issues))\nPYENFORCEMENT\n"
+    - name: 10h - V27 enforcement attribution and security-readiness audit
+      shell: bash
+      run: "set -euo pipefail\npython3 - <<'PYV27'\nimport hashlib,json,pathlib,re\nout=pathlib.Path('results')\n\
+        repo=pathlib.Path('QuickSafe/quicksafe')\nread=json.loads((out/'protected-runtime-experiment.json').read_text())\n\
+        write=json.loads((out/'protected-write-experiment.json').read_text())\nv26=json.loads((out/'v26-access-enforcement-evidence.json').read_text())\n\
+        prov=json.loads((out/'verified-binary-provenance.json').read_text())\nbinary=repo/'build/targets/LibCalls/bin/libcalls'\n\
+        hash_ok=binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest()==prov.get('sha256_after_instrumented_rebuild')\n\
+        # Source and generated artifacts are inspected as attribution diagnostics only.\n# A source-level check,\
+        \ a symbol, or an OS SIGSEGV does not demonstrate runtime enforcement.\nfiles=[]\nfor folder in (repo/'build/targets/LibCalls',repo/'targets/LibCalls'):\n\
+        \ if folder.is_dir():\n  for p in folder.rglob('*'):\n   if p.is_file() and p.suffix in ('.ll','.s','.cpp','.cc','.c','.h')\
+        \ and p.stat().st_size<2000000:\n    files.append(p)\nfiles=sorted(set(files))[:250]\npatterns={'guard_allocation':r'guard_alloc|guard_dealloc','access_check':r'check_access|check_bounds|bounds_check','read_fixture':r'QS_READ_BEGIN','write_fixture':r'QS_WRITE_BEGIN'}\n\
+        source_matches=[]\nfor p in files:\n try: text=p.read_text(errors='replace')\n except OSError:continue\n\
+        \ found=[k for k,pat in patterns.items() if re.search(pat,text,re.I)]\n if found:source_matches.append({'path':str(p),'markers':found})\n\
+        reads=read.get('cases',[]);writes=write.get('cases',[])\nif not isinstance(reads,list) or not isinstance(writes,list):raise\
+        \ SystemExit('V27: malformed case lists')\nread_skips=[x for x in reads if x.get('guard_interval_skipped_by_completed_read')]\n\
+        write_skips=[x for x in writes if x.get('guard_interval_skip_write_observed')]\nread_faults=sum(x.get('classification')=='FAULT'\
+        \ for x in reads)\nwrite_faults=sum(x.get('classification')=='FAULT' for x in writes)\npositive=v26.get('positive_control',{})\n\
+        # Require explicit positive-control evidence. Never infer from success of OS-only controls.\npositive_verified=bool(positive.get('verified')\
+        \ is True and positive.get('available') is True and v26.get('memory_access_enforcement_verified') is True)\n\
+        report={\n 'experiment':'V27_ENFORCEMENT_ATTRIBUTION_AND_SECURITY_READINESS',\n 'binary_provenance_verified':bool(hash_ok),\n\
+        \ 'inspected_source_or_ir_files':len(files),\n 'source_marker_matches':source_matches[:50],\n 'protected_read_cases':len(reads),'protected_write_cases':len(writes),\n\
+        \ 'protected_read_faults':read_faults,'protected_write_faults':write_faults,\n 'read_guard_interval_skips':len(read_skips),'write_guard_interval_skips':len(write_skips),\n\
+        \ 'paired_quicksafe_on_off_positive_control_verified':positive_verified,\n 'runtime_memory_access_enforcement_verified':positive_verified,\n\
+        \ 'experimental_evidence_complete':bool(hash_ok and reads and writes and v26),\n 'security_validation_complete':positive_verified,\n\
+        \ 'security_result':'NO_CONFIRMED_BYPASS_IN_TESTED_CASES' if positive_verified and not (read_skips or write_skips)\
+        \ else 'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED' if not positive_verified else 'GUARD_SKIP_REQUIRES_POLICY_REVIEW',\n\
+        \ 'missing_security_evidence':([] if positive_verified else ['A paired QuickSafe-enabled versus QuickSafe-disabled\
+        \ positive control on the same mapped out-of-bounds memory access','Proof that the tested load/store executes\
+        \ under active QuickSafe access enforcement']),\n 'limitations':['Source/IR marker presence is not runtime\
+        \ proof','PROT_NONE faults may be operating-system faults','Successful out-of-bounds operations are not\
+        \ automatically QuickSafe bypasses']\n}\n(out/'v27-security-readiness.json').write_text(json.dumps(report,indent=2))\n\
+        print('V27_SECURITY_READINESS='+json.dumps({k:v for k,v in report.items() if k!='source_marker_matches'},indent=2),flush=True)\n\
+        if not report['experimental_evidence_complete']:raise SystemExit('V27_EVIDENCE_FAILURE: incomplete experiment/provenance\
+        \ evidence')\nPYV27"
     - name: 11 - Publish unambiguous verdict
       if: always()
       shell: bash
@@ -768,7 +802,7 @@ jobs:
         \    'protected_case_outcomes': protected.get('counts_by_outcome', {}),\n    'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),\n\
         \    'object_out_of_bounds_reads_completed': protected.get('object_out_of_bounds_reads_completed'),\n  \
         \  'quicksafe_vulnerability_confirmed': False, # Requires independent enforcement/policy verification beyond\
-        \ address-space evidence.\n    'note': 'v26 includes actual targeted-allocation write probes, but write-access\
+        \ address-space evidence.\n    'note': 'v27 includes actual targeted-allocation write probes, but write-access\
         \ enforcement is not independently established. Nonzero allocation instrumentation and binary hash provenance\
         \ do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe\
         \ outcomes must be evaluated against the observed memory map.'\n}\n# The final CI gate and the verdict producer\
@@ -804,14 +838,19 @@ jobs:
         report['memory_access_instrumentation_behavior_verified']=bool(enforcement.get('memory_access_enforcement_verified',False))\n\
         report['actual_quicksafe_write_access_enforcement_verified']=bool(enforcement.get('memory_access_enforcement_verified',False))\n\
         requirements['v26_enforcement_evidence_report']=bool(enforcement) and not enforcement.get('evidence_errors')\
-        \ and enforcement.get('binary_sha256_matches_verified_rebuild',False)\nmissing=[k for k,v in requirements.items()\
-        \ if not v]\nreport['evidence_schema_version'] = 1\nreport['evidence_requirements'] = requirements\nreport['missing_evidence']\
-        \ = missing\nreport['execution_complete'] = not missing\nreport['result_status'] = 'COMPLETE_NO_BYPASS_CONFIRMED'\
-        \ if not missing else 'INCOMPLETE_NOT_A_SECURITY_VERDICT'\nreport['protected_write_case_count'] = protected_writes.get('case_count',0)\n\
-        report['protected_write_faults'] = protected_writes.get('faults',0)\nreport['protected_write_successes']\
-        \ = protected_writes.get('successful_writes',0)\nreport['protected_write_guard_skips'] = protected_writes.get('verified_guard_interval_skip_writes',0)\n\
-        report['security_assessment_limitations'] = ['Memory-access enforcement has not been independently verified;\
-        \ completed out-of-bounds operations alone do not establish a QuickSafe bypass.']\n(out / 'final-verdict.json').write_text(json.dumps(report,\
+        \ and enforcement.get('binary_sha256_matches_verified_rebuild',False)\n\nv27_path=out/'v27-security-readiness.json'\n\
+        v27=json.loads(v27_path.read_text()) if v27_path.is_file() else {}\nrequirements['v27_security_readiness_report']=bool(v27)\
+        \ and v27.get('experimental_evidence_complete') is True\nreport['v27_security_readiness']=v27.get('security_result','MISSING')\n\
+        report['security_validation_complete']=v27.get('security_validation_complete') is True\nreport['security_validation_missing_evidence']=v27.get('missing_security_evidence',[])\n\
+        report['security_assessment_status']='COMPLETE' if report['security_validation_complete'] else 'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED'\n\
+        \nmissing=[k for k,v in requirements.items() if not v]\nreport['evidence_schema_version'] = 1\nreport['evidence_requirements']\
+        \ = requirements\nreport['missing_evidence'] = missing\nreport['execution_complete'] = not missing\nreport['result_status']\
+        \ = 'COMPLETE_NO_BYPASS_CONFIRMED' if not missing else 'INCOMPLETE_NOT_A_SECURITY_VERDICT'\nreport['protected_write_case_count']\
+        \ = protected_writes.get('case_count',0)\nreport['protected_write_faults'] = protected_writes.get('faults',0)\n\
+        report['protected_write_successes'] = protected_writes.get('successful_writes',0)\nreport['protected_write_guard_skips']\
+        \ = protected_writes.get('verified_guard_interval_skip_writes',0)\nreport['security_assessment_limitations']\
+        \ = ['Memory-access enforcement has not been independently verified; completed out-of-bounds operations\
+        \ alone do not establish a QuickSafe bypass.']\n(out / 'final-verdict.json').write_text(json.dumps(report,\
         \ indent=2))\nprint(json.dumps(report, indent=2))\nwith open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as\
         \ f:\n    f.write('# QuickSafe research\\n\\n')\n    for key, value in report.items():\n        f.write(f'-\
         \ **{key}:** {value}\\n')\nPY\n"
@@ -819,7 +858,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v26
+        name: quicksafe-ultraverbose-v27
         path: 'results/
 
           guard_control.c
@@ -829,6 +868,7 @@ jobs:
           '
         if-no-files-found: warn
         retention-days: 14
+      run: ''
     - name: 13 - Validate explicit evidence schema after artifact upload
       if: always()
       shell: bash
@@ -848,7 +888,9 @@ jobs:
         \    sys.exit('CI_EVIDENCE_FAILURE: execution_complete must be boolean')\nif any(type(v) is not bool for\
         \ v in r['evidence_requirements'].values()):\n    sys.exit('CI_EVIDENCE_FAILURE: evidence requirements must\
         \ be booleans')\nif not r['execution_complete'] or r['missing_evidence']:\n    sys.exit('CI_EVIDENCE_FAILURE:\
-        \ '+', '.join(r['missing_evidence']))\nif not r.get('v26_enforcement_evidence_collected'):\n    sys.exit('CI_EVIDENCE_FAILURE:\
-        \ v26 enforcement evidence report missing')\nif not r.get('instrumentation_preconditions_met') or not r.get('actual_quicksafe_protected_write_baseline_verified'):\n\
-        \    sys.exit('CI_EVIDENCE_FAILURE: instrumentation or protected write baseline not verified')\nprint('CI_EVIDENCE_GATE=PASS;\
-        \ security bypass remains unconfirmed unless separately established')\nPYFINAL"
+        \ '+', '.join(r['missing_evidence']))\nif r.get('security_assessment_status') not in ('COMPLETE','INCONCLUSIVE_ENFORCEMENT_UNVERIFIED'):\n\
+        \    sys.exit('CI_EVIDENCE_FAILURE: missing security assessment status')\nif not r.get('v26_enforcement_evidence_collected'):\n\
+        \    sys.exit('CI_EVIDENCE_FAILURE: v26 enforcement evidence report missing')\nif not r.get('instrumentation_preconditions_met')\
+        \ or not r.get('actual_quicksafe_protected_write_baseline_verified'):\n    sys.exit('CI_EVIDENCE_FAILURE:\
+        \ instrumentation or protected write baseline not verified')\nprint('CI_EVIDENCE_GATE=PASS; security bypass\
+        \ remains unconfirmed unless separately established')\nPYFINAL"
