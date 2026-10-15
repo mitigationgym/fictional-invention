@@ -1,4 +1,4 @@
-name: QuickSafe v19 verified fault classification and guard matrix
+name: QuickSafe v20 per-process guard interval evidence and provenance
 on:
   push: null
   pull_request: null
@@ -111,7 +111,7 @@ jobs:
         assert Q.positive(3) is not None
         print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
         PY
-        echo "WORKFLOW_REVISION=v18-ultra-verbose-guard-matrix" >> "$GITHUB_ENV"
+        echo "WORKFLOW_REVISION=v20-guard-interval-evidence" >> "$GITHUB_ENV"
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
         "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -133,7 +133,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        echo 'WORKFLOW_REVISION=v18-ultra-verbose-guard-matrix'
+        echo 'WORKFLOW_REVISION=v20-guard-interval-evidence'
         python3 - <<'PYFIX'
         from pathlib import Path
         import ast
@@ -534,7 +534,7 @@ jobs:
                     const bool at_target=addr>=lo && addr<hi;
                     const uintptr_t after=base+static_cast<uintptr_t>(pg);
                     const bool at_next=after>=lo && after<hi;
-                    if (at_base || at_target || at_next) std::cout << "QS_MAP=" << line << "\n";
+                    std::cout << "QS_MAP=" << line << "\n";
                     if (at_target) std::cout << "QS_TARGET_MAPPING_PERMS=" << perms << "\n";
                     if (at_next) std::cout << "QS_PAGE_PLUS_ONE_PERMS=" << perms << "\n";
                 }
@@ -891,7 +891,34 @@ jobs:
             perms=re.findall(r'^QS_TARGET_MAPPING_PERMS=([^\n]+)',output,re.M)
             guard=re.findall(r'^QS_PAGE_PLUS_ONE_PERMS=([^\n]+)',output,re.M)
             outcome=classify(rc,output)
+            # Derive interval evidence ONLY from the same child process's maps.
+            # /proc/self/maps describes page mappings; it does not by itself
+            # establish which QuickSafe runtime check (if any) guarded a read.
+            base_match=re.search(r'(?m)^QS_BASE=0x([0-9a-fA-F]+)$',output)
+            addr_match=re.search(r'(?m)^QS_ADDR=0x([0-9a-fA-F]+)$',output)
+            base=int(base_match.group(1),16) if base_match else None
+            target=int(addr_match.group(1),16) if addr_match else None
+            maps=[]
+            for mm in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\s+([rwxps-]{4})(?:\s|$)',output):
+                maps.append({'start':int(mm.group(1),16),'end':int(mm.group(2),16),'perms':mm.group(3)})
+            base_map=next((m for m in maps if base is not None and m['start']<=base<m['end']),None)
+            target_map=next((m for m in maps if target is not None and m['start']<=target<m['end']),None)
+            # A true skip must start in the allocation, cross a whole
+            # inaccessible mapped interval, and end in readable memory.
+            intervening_guards=[m for m in maps if base is not None and target is not None
+                                and base<m['start'] and m['end']<=target
+                                and m['perms'].startswith('---')]
+            verified_skip=(outcome=='READ_SUCCEEDED' and base is not None and
+                           target is not None and target>=base+64 and
+                           base_map is not None and 'r' in base_map['perms'] and
+                           target_map is not None and 'r' in target_map['perms'] and
+                           bool(intervening_guards))
             results.append({'offset':offset,'exit_code':rc,
+                'allocation_base':base,'target_address':target,
+                'base_mapping':base_map,'destination_mapping':target_map,
+                'intervening_inaccessible_intervals':intervening_guards,
+                'guard_interval_skipped_by_completed_read':verified_skip,
+                'mapping_parse_count':len(maps),
                 'read_started':marker(output,'QS_READ_BEGIN'),
                 'read_completed':outcome=='READ_SUCCEEDED',
                 'read_success_marker_present':marker(output,'QS_READ_OK'),
@@ -904,26 +931,33 @@ jobs:
         distant_read=any(x['offset']>=2*page and x['read_completed'] and x['target_mapping_permissions'] and x['target_mapping_permissions'][0].startswith('r') for x in results)
         guard_faults=sum(x['classification']=='FAULT' and any(p.startswith('---') for p in x['target_mapping_permissions']) for x in results)
         object_oob_success=sum(x['offset']>=64 and x['read_completed'] for x in results)
+        interval_skips=[x for x in results if x['guard_interval_skipped_by_completed_read']]
+        # This establishes an address-space guard skip, NOT necessarily a
+        # vulnerability in QuickSafe's intended threat model or access checks.
         report={'experiment':'ACTUAL_QUICKSAFE_INSTRUMENTED_LIBCALLS_PROBE','selector':prov['selector'],
          'final_binary_sha256':digest,'probe_in_final_binary':b'QS_PROBE_BEGIN' in binary.read_bytes(),
          'baseline_inbounds_read_ok':base_ok,'cases':results,
          'guard_mapping_observed_at_base_plus_page':guard_observed,
          'mapped_distant_read_observed':distant_read,
+         'per_process_guard_interval_skip_count':len(interval_skips),
+         'per_process_guard_interval_skip_offsets':[x['offset'] for x in interval_skips],
          'case_count':len(results),
          'counts_by_outcome':{k:sum(x['classification']==k for x in results) for k in ['READ_SUCCEEDED','FAULT','TIMEOUT','OTHER_EXIT']},
          'page_size':page,'faults_on_inaccessible_mapping':guard_faults,
          'object_out_of_bounds_reads_completed':object_oob_success,
          'classification_method':'Only exact standalone QS_READ_OK=1 with exit 0 means success; QuickSafe fatal exit 123 and SIGSEGV are faults.',
          'test_design':'In-bounds, near-boundary, page-straddling, distant page, and mapping-permission correlation. One fresh process per case.',
-         'protected_guard_bypass_candidate':bool(base_ok and guard_observed and distant_read),
+         'protected_guard_bypass_candidate':bool(base_ok and interval_skips),
          'protected_guard_bypass_confirmed':False,
-         'limitations':'Offset is relative to the allocation pointer, not necessarily page-aligned. The tests perform reads only. A mapped distant read alone does not prove crossing a guard or defeating all QuickSafe protections. Manual address-interval analysis remains necessary.'}
+         'limitations':'Per-process /proc/self/maps evidence proves virtual-address interval geometry, not QuickSafe policy enforcement. A successful read after an inaccessible mapping can be a guard skip without being a QuickSafe vulnerability. The tests perform reads only; independently verify QuickSafe access-check instrumentation and intended security contract.'}
         (out/'protected-runtime-experiment.json').write_text(json.dumps(report,indent=2))
         print('PROTECTED_RUNTIME_EXPERIMENT_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)
         if sum(report['counts_by_outcome'].values())!=len(results):
             raise SystemExit('FAIL CLOSED: classification counts inconsistent')
         if any(x['exit_code']!=0 and x['read_completed'] for x in results):
             raise SystemExit('FAIL CLOSED: nonzero exit incorrectly marked successful')
+        if any(x['guard_interval_skipped_by_completed_read'] and not x['read_completed'] for x in results):
+            raise SystemExit('FAIL CLOSED: interval skip flagged without completed read')
         if not report['probe_in_final_binary'] or not base_ok:
             raise SystemExit('FAIL CLOSED: in-bounds instrumented baseline did not complete')
         PYPROBE
@@ -963,10 +997,12 @@ jobs:
             'protected_runtime_experiment_executed': bool(protected.get('cases')),
             'guard_mapping_observed': bool(protected.get('guard_mapping_observed_at_base_plus_page')),
             'quicksafe_guard_bypass_tested': bool(protected.get('cases')) and bool(protected.get('guard_mapping_observed_at_base_plus_page')),
+            'per_process_guard_interval_skip_count': protected.get('per_process_guard_interval_skip_count'),
+            'per_process_guard_interval_skip_offsets': protected.get('per_process_guard_interval_skip_offsets'),
             'protected_case_outcomes': protected.get('counts_by_outcome', {}),
             'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),
             'object_out_of_bounds_reads_completed': protected.get('object_out_of_bounds_reads_completed'),
-            'quicksafe_vulnerability_confirmed': bool(protected.get('protected_guard_bypass_confirmed')),
+            'quicksafe_vulnerability_confirmed': False, # Requires independent enforcement/policy verification beyond address-space evidence.
             'note': 'Nonzero allocation instrumentation and binary hash provenance do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe outcomes must be evaluated against the observed memory map.'
         }
         (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
@@ -980,7 +1016,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v19
+        name: quicksafe-ultraverbose-v20
         path: |
           results/
           guard_control.c
