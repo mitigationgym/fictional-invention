@@ -859,16 +859,12 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: quicksafe-ultraverbose-v27
-        path: 'results/
-
+        path: |
+          results/
           guard_control.c
-
           monitor.py
-
-          '
         if-no-files-found: warn
         retention-days: 14
-      run: ''
     - name: 13 - Validate explicit evidence schema after artifact upload
       if: always()
       shell: bash
