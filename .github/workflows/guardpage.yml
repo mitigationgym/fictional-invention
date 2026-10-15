@@ -1,4 +1,4 @@
-name: QuickSafe v18 ultra-verbose guard boundary matrix
+name: QuickSafe v19 verified fault classification and guard matrix
 on:
   push: null
   pull_request: null
@@ -856,6 +856,22 @@ jobs:
         lib=pathlib.Path('build/packages/QuickSafePass/install/lib').resolve()
         env=os.environ.copy()
         env['LD_LIBRARY_PATH']=str(lib)+':'+str(pathlib.Path('build/packages/libbacktrace/install/lib').resolve())+':/usr/lib/llvm-16/lib:'+env.get('LD_LIBRARY_PATH','')
+        # Runtime crash diagnostics quote source lines containing QS_READ_OK=1.
+        # Only accept a complete, standalone marker AND a clean process exit.
+        def marker(output, name):
+            return re.search(r'(?m)^'+re.escape(name)+r'=1\s*$', output) is not None
+        def classify(rc, output):
+            success=rc == 0 and marker(output,'QS_READ_OK')
+            fatal=rc in (-11,-7,123) or bool(re.search(r'(?m)^\[QuickSafeRT\].*(?:SIGSEGV|Segfault .*fatal)',output))
+            if success: return 'READ_SUCCEEDED'
+            if rc is None: return 'TIMEOUT'
+            if fatal: return 'FAULT'
+            return 'OTHER_EXIT'
+        # Fail closed if diagnostic source excerpts can forge a success marker.
+        assert classify(123,'QS_READ_BEGIN=1\n    std::cout << "QS_READ_OK=1\\n";\n[QuickSafeRT] Caught SIGSEGV') == 'FAULT'
+        assert classify(0,'QS_READ_BEGIN=1\nQS_READ_OK=1\n') == 'READ_SUCCEEDED'
+        assert classify(123,'QS_READ_OK=1\n[QuickSafeRT] Segfault is fatal') == 'FAULT'
+        assert classify(None,'TIMEOUT') == 'TIMEOUT'
         results=[]
         # Probe both sides of every page boundary and multiple distant pages.
         # Each read occurs in its own process so a SIGSEGV cannot terminate the matrix.
@@ -871,16 +887,23 @@ jobs:
             except subprocess.TimeoutExpired as exc:
                 rc,output=None,str(exc.stdout or '')+'\nTIMEOUT'
             logfile=out/f'protected-offset-{offset}.log';logfile.write_text(output)
-            print(f'=== PROTECTED OFFSET {offset} EXIT {rc} READ_OK={"QS_READ_OK=1" in output} ===',flush=True)
+            print(f'=== PROTECTED OFFSET {offset} EXIT {rc} READ_OK={rc==0 and marker(output,'QS_READ_OK')} ===',flush=True)
             perms=re.findall(r'^QS_TARGET_MAPPING_PERMS=([^\n]+)',output,re.M)
             guard=re.findall(r'^QS_PAGE_PLUS_ONE_PERMS=([^\n]+)',output,re.M)
-            results.append({'offset':offset,'exit_code':rc,'read_started':'QS_READ_BEGIN=1' in output,
-                'read_completed':'QS_READ_OK=1' in output,'signal':-rc if rc is not None and rc<0 else None,
-                'target_mapping_permissions':perms,'page_plus_one_permissions':guard,'log':str(logfile), 'read_faulted':rc in (-11,-7), 'timed_out':rc is None,
-                'classification':('READ_SUCCEEDED' if 'QS_READ_OK=1' in output else 'FAULT' if rc in (-11,-7) else 'TIMEOUT' if rc is None else 'OTHER_EXIT')})
+            outcome=classify(rc,output)
+            results.append({'offset':offset,'exit_code':rc,
+                'read_started':marker(output,'QS_READ_BEGIN'),
+                'read_completed':outcome=='READ_SUCCEEDED',
+                'read_success_marker_present':marker(output,'QS_READ_OK'),
+                'signal':-rc if rc is not None and rc<0 else None,
+                'target_mapping_permissions':perms,'page_plus_one_permissions':guard,
+                'log':str(logfile),'read_faulted':outcome=='FAULT',
+                'timed_out':outcome=='TIMEOUT','classification':outcome})
         base_ok=results[0]['read_completed'] and results[0]['exit_code']==0
         guard_observed=any(x['page_plus_one_permissions'] and x['page_plus_one_permissions'][0].startswith('---') for x in results)
-        distant_read=any(x['offset']>=2*page and x['read_completed'] and x['target_mapping_permissions'] and 'r' in x['target_mapping_permissions'][0] for x in results)
+        distant_read=any(x['offset']>=2*page and x['read_completed'] and x['target_mapping_permissions'] and x['target_mapping_permissions'][0].startswith('r') for x in results)
+        guard_faults=sum(x['classification']=='FAULT' and any(p.startswith('---') for p in x['target_mapping_permissions']) for x in results)
+        object_oob_success=sum(x['offset']>=64 and x['read_completed'] for x in results)
         report={'experiment':'ACTUAL_QUICKSAFE_INSTRUMENTED_LIBCALLS_PROBE','selector':prov['selector'],
          'final_binary_sha256':digest,'probe_in_final_binary':b'QS_PROBE_BEGIN' in binary.read_bytes(),
          'baseline_inbounds_read_ok':base_ok,'cases':results,
@@ -888,13 +911,19 @@ jobs:
          'mapped_distant_read_observed':distant_read,
          'case_count':len(results),
          'counts_by_outcome':{k:sum(x['classification']==k for x in results) for k in ['READ_SUCCEEDED','FAULT','TIMEOUT','OTHER_EXIT']},
-         'page_size':page,
+         'page_size':page,'faults_on_inaccessible_mapping':guard_faults,
+         'object_out_of_bounds_reads_completed':object_oob_success,
+         'classification_method':'Only exact standalone QS_READ_OK=1 with exit 0 means success; QuickSafe fatal exit 123 and SIGSEGV are faults.',
          'test_design':'In-bounds, near-boundary, page-straddling, distant page, and mapping-permission correlation. One fresh process per case.',
          'protected_guard_bypass_candidate':bool(base_ok and guard_observed and distant_read),
          'protected_guard_bypass_confirmed':False,
          'limitations':'Offset is relative to the allocation pointer, not necessarily page-aligned. The tests perform reads only. A mapped distant read alone does not prove crossing a guard or defeating all QuickSafe protections. Manual address-interval analysis remains necessary.'}
         (out/'protected-runtime-experiment.json').write_text(json.dumps(report,indent=2))
         print('PROTECTED_RUNTIME_EXPERIMENT_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)
+        if sum(report['counts_by_outcome'].values())!=len(results):
+            raise SystemExit('FAIL CLOSED: classification counts inconsistent')
+        if any(x['exit_code']!=0 and x['read_completed'] for x in results):
+            raise SystemExit('FAIL CLOSED: nonzero exit incorrectly marked successful')
         if not report['probe_in_final_binary'] or not base_ok:
             raise SystemExit('FAIL CLOSED: in-bounds instrumented baseline did not complete')
         PYPROBE
@@ -930,10 +959,13 @@ jobs:
             'instrumentation_preconditions_met': health('instrumentation-audit.json', 'instrumentation_preconditions_met'),
             'targeted_allocation_instrumented': health('instrumentation-audit.json', 'targeted_allocation_instrumented'),
             'binary_matches_instrumented_rebuild': health('instrumentation-audit.json', 'binary_matches_instrumented_rebuild'),
-            'memory_access_instrumentation_behavior_verified': bool(protected.get('baseline_inbounds_read_ok')),
+            'memory_access_instrumentation_behavior_verified': False, # Allocation instrumentation and OS page faults do not establish access-check instrumentation.
             'protected_runtime_experiment_executed': bool(protected.get('cases')),
             'guard_mapping_observed': bool(protected.get('guard_mapping_observed_at_base_plus_page')),
-            'quicksafe_guard_bypass_tested': bool(protected.get('cases')),
+            'quicksafe_guard_bypass_tested': bool(protected.get('cases')) and bool(protected.get('guard_mapping_observed_at_base_plus_page')),
+            'protected_case_outcomes': protected.get('counts_by_outcome', {}),
+            'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),
+            'object_out_of_bounds_reads_completed': protected.get('object_out_of_bounds_reads_completed'),
             'quicksafe_vulnerability_confirmed': bool(protected.get('protected_guard_bypass_confirmed')),
             'note': 'Nonzero allocation instrumentation and binary hash provenance do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe outcomes must be evaluated against the observed memory map.'
         }
@@ -948,7 +980,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v18
+        name: quicksafe-ultraverbose-v19
         path: |
           results/
           guard_control.c
