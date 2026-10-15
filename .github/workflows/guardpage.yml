@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v12 - Ultra Verbose Runtime Evidence and Precise Failures
+name: QuickSafe Ultra Verbose v13 - Instrumentation Audit Fail Closed
 
 on:
   push:
@@ -627,6 +627,79 @@ jobs:
           PYRUN
           echo 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'
 
+      - name: '10b - Deep QuickSafe instrumentation audit (fail closed)'
+        if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
+        id: instrumentation_audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd QuickSafe/quicksafe
+          out=../../results
+          target=build/targets/LibCalls/bin/libcalls
+          passlib=build/packages/QuickSafePass/install/lib
+          echo '========== INSTRUMENTATION AUDIT =========='
+          echo '=== Git revision and environment ==='
+          git rev-parse HEAD || true
+          printf 'VP_TARGETS_STR=%q\n' "${VP_TARGETS_STR-}"
+          echo '=== Source references to target selection ==='
+          grep -RInE 'VP_TARGETS_STR|No targets found|vp-pass-loglevel|check_access|guard_alloc' \
+            src include packages instances targets tests/libcalls 2>/dev/null \
+            | head -n 180 | tee "$out/target-selection-source.txt" || true
+          echo '=== Build log target-selection and pass messages ==='
+          grep -nEi 'VP_TARGETS_STR|No targets found|Running QuickSafe on|QuickSafe constructor|QuickSafe destructor|QuickSafePass|guard_alloc|instrument|skipping' \
+            "$out/quicksafe-build.log" | tee "$out/instrumentation-build-evidence.txt" || true
+          echo '=== Link and compile command evidence ==='
+          if [ -f build/targets/LibCalls/build/build.ninja ]; then
+            ninja -C build/targets/LibCalls/build -t commands \
+              > "$out/libcalls-build-commands.txt" 2>&1 || true
+            cat "$out/libcalls-build-commands.txt"
+          fi
+          echo '=== Dynamic loader resolution without launcher ==='
+          ldd "$target" 2>&1 | tee "$out/ldd-without-launcher.txt" || true
+          echo '=== Dynamic loader resolution WITH QuickSafe library paths ==='
+          LD_LIBRARY_PATH="$PWD/$passlib:$PWD/build/packages/libbacktrace/install/lib:/usr/lib/llvm-16/lib:${LD_LIBRARY_PATH-}" \
+            ldd "$target" 2>&1 | tee "$out/ldd-with-quicksafe-path.txt" || true
+          echo '=== ELF dynamic dependencies ==='
+          readelf -dW "$target" 2>&1 | tee "$out/libcalls-dynamic-section.txt" || true
+          echo '=== ELF symbols associated with QuickSafe ==='
+          { nm -aC "$target" 2>&1 || true; echo '--- dynamic ---'; nm -DC "$target" 2>&1 || true; } \
+            | tee "$out/libcalls-symbols.txt" | grep -Ei 'quicksafe|guard_|check_access|mprotect|track_global' | head -n 100 || true
+          echo '=== Disassembly markers (bounded) ==='
+          objdump -dC "$target" 2>/dev/null | grep -Ein 'guard_alloc|guard_dealloc|check_access|mprotect' \
+            | head -n 100 | tee "$out/libcalls-disassembly-markers.txt" || true
+          echo '=== Machine-readable assessment ==='
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          out=pathlib.Path('../../results')
+          build=(out/'quicksafe-build.log').read_text(errors='replace')
+          run=(out/'quicksafe-run.log').read_text(errors='replace') if (out/'quicksafe-run.log').exists() else ''
+          dynamic=(out/'ldd-with-quicksafe-path.txt').read_text(errors='replace')
+          symbols=(out/'libcalls-symbols.txt').read_text(errors='replace')
+          source=(out/'target-selection-source.txt').read_text(errors='replace')
+          skip=[{'line':i,'text':line.strip()} for i,line in enumerate(build.splitlines(),1)
+                if re.search(r'No targets found in \$VP_TARGETS_STR; skipping',line)]
+          pass_invoked=bool(re.search(r'Running QuickSafe on:',build))
+          plugin_linked='--load-pass-plugin=' in build
+          missing_libs=[line.strip() for line in dynamic.splitlines() if '=> not found' in line]
+          target_specified=bool(os.environ.get('VP_TARGETS_STR','').strip())
+          runtime_symbols=bool(re.search(r'guard_alloc|guard_dealloc|check_access|quicksafe\.globals_ctor',symbols,re.I))
+          # A symbol or linked runtime alone does not prove memory accesses were instrumented.
+          proven=pass_invoked and plugin_linked and not skip and target_specified and not missing_libs
+          report={'pass_invoked':pass_invoked,'plugin_linked':plugin_linked,
+                  'target_specified_in_step_environment':target_specified,
+                  'target_selection_skipped':bool(skip),'skip_evidence':skip,
+                  'runtime_symbols_detected':runtime_symbols,
+                  'missing_runtime_libraries_with_explicit_path':missing_libs,
+                  'instrumentation_preconditions_met':proven,
+                  'memory_access_instrumentation_behavior_verified':False,
+                  'protected_guard_bypass_tested':False,
+                  'note':'Preconditions are not proof of effective memory-access instrumentation. A protected target test is still required.'}
+          (out/'instrumentation-audit.json').write_text(json.dumps(report,indent=2))
+          print('QUICKSAFE_INSTRUMENTATION_AUDIT='+json.dumps(report,indent=2),flush=True)
+          if not proven:
+              raise SystemExit('FAIL CLOSED: QuickSafe target instrumentation not established. Inspect VP_TARGETS_STR and source target-selection evidence.')
+          PY
+
       - name: '11 - Publish unambiguous verdict'
         if: always()
         shell: bash
@@ -650,9 +723,11 @@ jobs:
               'official_quicksafe_build_verified': health('quicksafe-build-health.json', 'build_healthy') and health('quicksafe-artifacts.json', 'pass_verified') and health('quicksafe-artifacts.json', 'target_files_present'),
               'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
               'official_quicksafe_run_verified': health('quicksafe-run-health.json', 'run_healthy'),
+              'instrumentation_preconditions_met': health('instrumentation-audit.json', 'instrumentation_preconditions_met'),
+              'memory_access_instrumentation_behavior_verified': False,
               'quicksafe_guard_bypass_tested': False,
               'quicksafe_vulnerability_confirmed': False,
-              'note': 'CLI exit codes alone are not evidence of success. The six GDB tests use a separate, unprotected control target. '
+              'note': 'A loaded pass is not equivalent to instrumentation; target selection may be skipped. The six GDB tests use a separate, unprotected control target. '
                       'Building/running LibCalls does not test a QuickSafe guard-page bypass.'
           }
           (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
@@ -667,7 +742,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v12
+          name: quicksafe-ultraverbose-v13
           path: |
             results/
             guard_control.c
