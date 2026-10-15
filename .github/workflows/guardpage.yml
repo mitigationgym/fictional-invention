@@ -111,7 +111,7 @@ jobs:
         assert Q.positive(3) is not None
         print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
         PY
-        echo "WORKFLOW_REVISION=v21-guard-jump-matrix" >> "$GITHUB_ENV"
+        echo "WORKFLOW_REVISION=v22-guard-jump-writes" >> "$GITHUB_ENV"
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
         "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -133,7 +133,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        echo 'WORKFLOW_REVISION=v21-guard-jump-matrix'
+        echo 'WORKFLOW_REVISION=v22-guard-jump-writes'
         python3 - <<'PYFIX'
         from pathlib import Path
         import ast
@@ -1090,6 +1090,108 @@ jobs:
           sys.exit(1)
         PYJUMP
         python3 results/run-jump-matrix.py
+    - name: 10e - Fifteen guard-jump write cases with parent-observed shared sentinels
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p results/write-jump
+        cat > results/write-jump/guard_write.c <<'CWRITE'
+        #define _GNU_SOURCE
+        #include <sys/mman.h>
+        #include <sys/wait.h>
+        #include <sys/types.h>
+        #include <unistd.h>
+        #include <stdint.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <signal.h>
+        #include <errno.h>
+        #include <inttypes.h>
+        __attribute__((noinline)) static void helper(volatile unsigned char *p, size_t n, unsigned char v) {
+          for(size_t i=0;i<n;i++) p[i]=v;
+        }
+        int main(int argc,char **argv) {
+          if(argc!=4) return 90;
+          int id=atoi(argv[1]), strict=atoi(argv[2]), opt=atoi(argv[3]);
+          (void)opt;
+          long ps=sysconf(_SC_PAGESIZE); if(ps<=0 || id<1 || id>15) return 91;
+          size_t page=(size_t)ps, guards=1, landing=0, width=1;
+          switch(id) {
+            case 2:landing=16;break; case 3:landing=page-1;break;
+            case 4:guards=2;break;case 5:guards=4;break;
+            case 6:guards=8;break;case 7:guards=16;break;case 8:guards=64;break;
+            case 9:width=8;break;case 10:width=16;break;
+            case 11:landing=1;width=8;break;case 12:landing=32;width=8;break;
+            case 13:guards=2;break;case 14:landing=64;break;
+            case 15:landing=128;break;
+          }
+          if(landing+width>page) return 92;
+          size_t count=guards+2, len=count*page;
+          unsigned char *region=mmap(NULL,len,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+          if(region==MAP_FAILED) {perror("mmap");return 93;}
+          if(mprotect(region+page,guards*page,PROT_NONE)) {perror("mprotect");return 94;}
+          unsigned char *dst=region+(guards+1)*page+landing;
+          memset(dst,0x31,width);
+          printf("CASE=%d STRICT=%d OPT=%d PAGE=%zu GUARDS=%zu WIDTH=%zu LANDING=%zu\n",id,strict,opt,page,guards,width,landing);
+          printf("SOURCE=0x%" PRIxPTR " GUARD_START=0x%" PRIxPTR " GUARD_END=0x%" PRIxPTR " DEST=0x%" PRIxPTR "\n",(uintptr_t)region,(uintptr_t)(region+page),(uintptr_t)(region+(guards+1)*page),(uintptr_t)dst);
+          FILE *maps=fopen("/proc/self/maps","r");
+          if(maps) {char line[1024];while(fgets(line,sizeof line,maps)) fputs(line,stdout);fclose(maps);}
+          fflush(stdout);
+          pid_t pid=fork(); if(pid<0) return 95;
+          if(pid==0) {
+            if(strict) {_exit(42);} // Reference-policy control, NOT QuickSafe.
+            volatile unsigned char *derived=(volatile unsigned char *)(uintptr_t)((uintptr_t)region+(guards+1)*page+landing);
+            if(id==14) helper(derived,width,0xA7);
+            else for(size_t i=0;i<width;i++) derived[i]=0xA7;
+            _exit(0);
+          }
+          int status=0; if(waitpid(pid,&status,0)!=pid) return 96;
+          int changed=1;for(size_t i=0;i<width;i++) if(dst[i]!=0xA7) changed=0;
+          int untouched=1;for(size_t i=0;i<width;i++) if(dst[i]!=0x31) untouched=0;
+          int exited=WIFEXITED(status)?WEXITSTATUS(status):-1;
+          int signaled=WIFSIGNALED(status)?WTERMSIG(status):0;
+          printf("CHILD_EXIT=%d CHILD_SIGNAL=%d SENTINEL_CHANGED=%d SENTINEL_UNTOUCHED=%d\n",exited,signaled,changed,untouched);
+          int ok=strict?(exited==42 && untouched):(exited==0 && changed);
+          printf("CONTROL_PASS=%d QUICKSAFE_PROTECTED=0\n",ok);
+          munmap(region,len);return ok?0:97;
+        }
+        CWRITE
+        python3 - <<'PYWRITE'
+        import subprocess,hashlib,json,re,pathlib,sys
+        root=pathlib.Path('results/write-jump');src=root/'guard_write.c'
+        cases=[]
+        for opt in (0,2):
+          binary=root/f'guard_write_O{opt}'
+          subprocess.run(['clang-16',f'-O{opt}','-g','-fno-omit-frame-pointer','-Wall','-Wextra',str(src),'-o',str(binary)],check=True)
+          sha=hashlib.sha256(binary.read_bytes()).hexdigest()
+          for case in range(1,16):
+            for strict in (0,1):
+              proc=subprocess.run([str(binary),str(case),str(strict),str(opt)],capture_output=True,text=True,timeout=15)
+              log=proc.stdout+proc.stderr
+              path=root/f'case-{case:02d}-O{opt}-strict{strict}.log';path.write_text(log)
+              def value(key):
+                m=re.search(r'(?m)(?:^| )'+re.escape(key)+r'=([^ \n]+)',log)
+                return m.group(1) if m else None
+              source,gs,ge,dst=[int(value(x),16) if value(x) else None for x in ('SOURCE','GUARD_START','GUARD_END','DEST')]
+              maps=[]
+              for line in log.splitlines():
+                m=re.match(r'^([0-9a-f]+)-([0-9a-f]+)\s+([rwxps-]{4})',line)
+                if m:maps.append((int(m[1],16),int(m[2],16),m[3]))
+              page=int(value('PAGE') or 0)
+              guard_valid=bool(page and gs is not None and ge is not None and all(any(a<=p and b>=p+page and perm.startswith('---') for a,b,perm in maps) for p in range(gs,ge,page)))
+              target_valid=bool(dst is not None and any(a<=dst<b and 'w' in perm for a,b,perm in maps))
+              geometry=bool(source is not None and gs is not None and source<gs<ge<=dst and guard_valid and target_valid)
+              passed=proc.returncode==0 and value('CONTROL_PASS')=='1' and geometry
+              cases.append({'case':case,'optimization':opt,'strict_reference_control':bool(strict),'passed':passed,'geometry_verified':geometry,'sentinel_changed':value('SENTINEL_CHANGED')=='1','sentinel_untouched':value('SENTINEL_UNTOUCHED')=='1','child_exit':value('CHILD_EXIT'),'child_signal':value('CHILD_SIGNAL'),'binary_sha256':sha,'log':str(path),'quicksafe_protected':False})
+        summary={'experiment':'GUARD_JUMP_WRITE_SHARED_SENTINEL_OS_AND_REFERENCE_CONTROLS','total':len(cases),'passed':sum(x['passed'] for x in cases),'failed':sum(not x['passed'] for x in cases),'unprotected_writes_observed':sum(x['sentinel_changed'] and not x['strict_reference_control'] and x['geometry_verified'] for x in cases),'quicksafe_protected_write_cases':0,'quicksafe_write_bypass_confirmed':False,'limitations':'These are mmap-derived write controls, not QuickSafe-protected allocation writes. Strict policy is an artificial reference control. Parent checks shared sentinel after child exit. No QuickSafe write enforcement can be inferred.','cases':cases}
+        (root/'summary.json').write_text(json.dumps(summary,indent=2))
+        print('WRITE_JUMP_SUMMARY='+json.dumps({k:v for k,v in summary.items() if k!='cases'},indent=2),flush=True)
+        if summary['failed']:
+          for x in cases:
+            if not x['passed']:print('FAILED_WRITE_CONTROL='+json.dumps(x),flush=True)
+          sys.exit(1)
+        PYWRITE
     - name: 11 - Publish unambiguous verdict
       if: always()
       shell: bash
@@ -1113,7 +1215,15 @@ jobs:
         protected=json.loads(protected_path.read_text()) if protected_path.exists() else {}
         jump_path=out/'guard-jump-matrix.json'
         jump=json.loads(jump_path.read_text()) if jump_path.exists() else {}
+        write_path=out/'write-jump'/'summary.json'
+        writes=json.loads(write_path.read_text()) if write_path.exists() else {}
         report = {
+            'write_jump_control_cases': writes.get('total'),
+            'write_jump_control_passes': writes.get('passed'),
+            'write_jump_control_failures': writes.get('failed'),
+            'unprotected_guard_jump_writes_observed': writes.get('unprotected_writes_observed'),
+            'quicksafe_protected_write_cases': writes.get('quicksafe_protected_write_cases',0),
+            'quicksafe_write_bypass_confirmed': False,
             'mapped_jump_control_cases': jump.get('case_count'),
             'mapped_jump_control_passes': jump.get('pass_count'),
             'mapped_jump_control_failures': jump.get('fail_count'),
@@ -1152,7 +1262,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v21
+        name: quicksafe-ultraverbose-v22
         path: |
           results/
           guard_control.c
