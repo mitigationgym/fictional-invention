@@ -1,4 +1,4 @@
-name: QuickSafe v17 instrumented guard runtime probe
+name: QuickSafe v18 ultra-verbose guard boundary matrix
 on:
   push: null
   pull_request: null
@@ -111,7 +111,7 @@ jobs:
         assert Q.positive(3) is not None
         print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
         PY
-        echo "WORKFLOW_REVISION=v17-protected-runtime-probe" >> "$GITHUB_ENV"
+        echo "WORKFLOW_REVISION=v18-ultra-verbose-guard-matrix" >> "$GITHUB_ENV"
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
         "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -133,7 +133,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        echo 'WORKFLOW_REVISION=v17-protected-runtime-probe'
+        echo 'WORKFLOW_REVISION=v18-ultra-verbose-guard-matrix'
         python3 - <<'PYFIX'
         from pathlib import Path
         import ast
@@ -857,7 +857,13 @@ jobs:
         env=os.environ.copy()
         env['LD_LIBRARY_PATH']=str(lib)+':'+str(pathlib.Path('build/packages/libbacktrace/install/lib').resolve())+':/usr/lib/llvm-16/lib:'+env.get('LD_LIBRARY_PATH','')
         results=[]
-        for offset in [0,64,page,2*page,3*page]:
+        # Probe both sides of every page boundary and multiple distant pages.
+        # Each read occurs in its own process so a SIGSEGV cannot terminate the matrix.
+        offsets={0,1,2,7,15,31,32,47,62,63,64,65,66,95,127,128,129,255,256,511,512,1023,1024}
+        for boundary in [page,2*page,3*page,4*page,8*page,16*page,32*page,64*page,128*page]:
+            for delta in [-64,-2,-1,0,1,2,63,64]:
+                if boundary+delta>=0: offsets.add(boundary+delta)
+        for offset in sorted(offsets):
             env['QS_V17_OFFSET']=str(offset)
             try:
                 proc=subprocess.run([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=20)
@@ -865,12 +871,13 @@ jobs:
             except subprocess.TimeoutExpired as exc:
                 rc,output=None,str(exc.stdout or '')+'\nTIMEOUT'
             logfile=out/f'protected-offset-{offset}.log';logfile.write_text(output)
-            print(f'=== PROTECTED OFFSET {offset} EXIT {rc} ===\n{output}',flush=True)
+            print(f'=== PROTECTED OFFSET {offset} EXIT {rc} READ_OK={"QS_READ_OK=1" in output} ===',flush=True)
             perms=re.findall(r'^QS_TARGET_MAPPING_PERMS=([^\n]+)',output,re.M)
             guard=re.findall(r'^QS_PAGE_PLUS_ONE_PERMS=([^\n]+)',output,re.M)
             results.append({'offset':offset,'exit_code':rc,'read_started':'QS_READ_BEGIN=1' in output,
                 'read_completed':'QS_READ_OK=1' in output,'signal':-rc if rc is not None and rc<0 else None,
-                'target_mapping_permissions':perms,'page_plus_one_permissions':guard,'log':str(logfile)})
+                'target_mapping_permissions':perms,'page_plus_one_permissions':guard,'log':str(logfile), 'read_faulted':rc in (-11,-7), 'timed_out':rc is None,
+                'classification':('READ_SUCCEEDED' if 'QS_READ_OK=1' in output else 'FAULT' if rc in (-11,-7) else 'TIMEOUT' if rc is None else 'OTHER_EXIT')})
         base_ok=results[0]['read_completed'] and results[0]['exit_code']==0
         guard_observed=any(x['page_plus_one_permissions'] and x['page_plus_one_permissions'][0].startswith('---') for x in results)
         distant_read=any(x['offset']>=2*page and x['read_completed'] and x['target_mapping_permissions'] and 'r' in x['target_mapping_permissions'][0] for x in results)
@@ -879,11 +886,15 @@ jobs:
          'baseline_inbounds_read_ok':base_ok,'cases':results,
          'guard_mapping_observed_at_base_plus_page':guard_observed,
          'mapped_distant_read_observed':distant_read,
+         'case_count':len(results),
+         'counts_by_outcome':{k:sum(x['classification']==k for x in results) for k in ['READ_SUCCEEDED','FAULT','TIMEOUT','OTHER_EXIT']},
+         'page_size':page,
+         'test_design':'In-bounds, near-boundary, page-straddling, distant page, and mapping-permission correlation. One fresh process per case.',
          'protected_guard_bypass_candidate':bool(base_ok and guard_observed and distant_read),
          'protected_guard_bypass_confirmed':False,
-         'limitations':'Page offset is relative to allocation pointer; mapped distant access is not by itself proof of a bypass. Check allocation bounds and exact guard location.'}
+         'limitations':'Offset is relative to the allocation pointer, not necessarily page-aligned. The tests perform reads only. A mapped distant read alone does not prove crossing a guard or defeating all QuickSafe protections. Manual address-interval analysis remains necessary.'}
         (out/'protected-runtime-experiment.json').write_text(json.dumps(report,indent=2))
-        print('PROTECTED_RUNTIME_EXPERIMENT='+json.dumps(report,indent=2),flush=True)
+        print('PROTECTED_RUNTIME_EXPERIMENT_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)
         if not report['probe_in_final_binary'] or not base_ok:
             raise SystemExit('FAIL CLOSED: in-bounds instrumented baseline did not complete')
         PYPROBE
@@ -937,7 +948,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v16
+        name: quicksafe-ultraverbose-v18
         path: |
           results/
           guard_control.c
