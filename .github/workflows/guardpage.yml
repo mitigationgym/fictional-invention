@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v7 - Argcomplete and Comprehensive Startup Preflight
+name: QuickSafe Ultra Verbose Research v8 - LLVM Toolchain and Honest Build Verification
 
 on:
   push:
@@ -58,6 +58,31 @@ jobs:
             python3 --version
           } 2>&1 | tee results/native-toolchain.log
 
+      - name: '02b - Verify LLVM 16 installation and QuickSafe expected llvm-config path'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== LLVM 16 path compatibility ==='
+          command -v llvm-config-16
+          test -x /usr/bin/llvm-config-16
+          test "$(/usr/bin/llvm-config-16 --version)" = '16.0.6'
+          if [ -e /usr/local/bin/llvm-config ] && [ ! -L /usr/local/bin/llvm-config ]; then
+            echo 'ERROR: /usr/local/bin/llvm-config already exists and is not a symlink' >&2
+            exit 1
+          fi
+          sudo ln -sfn /usr/bin/llvm-config-16 /usr/local/bin/llvm-config
+          test -x /usr/local/bin/llvm-config
+          test "$(/usr/local/bin/llvm-config --version)" = '16.0.6'
+          {
+            ls -l /usr/local/bin/llvm-config /usr/bin/llvm-config-16
+            /usr/local/bin/llvm-config --version
+            /usr/local/bin/llvm-config --bindir
+            /usr/local/bin/llvm-config --libdir
+            /usr/local/bin/llvm-config --includedir
+            /usr/local/bin/llvm-config --cmakedir
+            clang-16 --version
+          } 2>&1 | tee results/llvm-path-check.log
+
       - name: '03 - Create persistent Python environment and install modules'
         shell: bash
         run: |
@@ -65,19 +90,19 @@ jobs:
           python3 -m venv "$GITHUB_WORKSPACE/.venv"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install \
-            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' 'argcomplete>=3,<5' packaging psutil pyelftools
+            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' 'argcomplete>=3,<5' colorlog terminaltables packaging psutil pyelftools
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip check
           "$GITHUB_WORKSPACE/.venv/bin/python" - <<'PY'
           import sys
-          import sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, packaging, psutil, elftools
+          import sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, colorlog, terminaltables, packaging, psutil, elftools
           from sympy import Q
           print('PYTHON_EXECUTABLE=', sys.executable)
-          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, packaging, psutil, elftools):
+          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, colorlog, terminaltables, packaging, psutil, elftools):
               print('IMPORT_OK=', mod.__name__, getattr(mod, '__version__', 'unknown'))
           assert Q.positive(3) is not None
           print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
-          echo "WORKFLOW_REVISION=v7-argcomplete-import-audit" >> "$GITHUB_ENV"
+          echo "WORKFLOW_REVISION=v8-llvm-build-verification" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -101,7 +126,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'WORKFLOW_REVISION=v7-argcomplete-import-audit'
+          echo 'WORKFLOW_REVISION=v8-llvm-build-verification'
           python3 - <<'PYFIX'
           from pathlib import Path
           import ast
@@ -378,7 +403,7 @@ jobs:
           PY
           python3 monitor.py 2>&1 | tee results/control-console.log
 
-      - name: '08 - Build actual QuickSafe LibCalls instance'
+      - name: '08 - Build actual QuickSafe LibCalls instance with traceback detection'
         id: quicksafe_build
         shell: bash
         run: |
@@ -391,23 +416,52 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           echo "$rc" > ../../results/quicksafe-build.exit
-          echo "QUICKSAFE_BUILD_EXIT=$rc"
-          exit "$rc"
+          python3 - <<'PYBUILD'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('../../results')
+          log = (root / 'quicksafe-build.log').read_text(errors='replace')
+          rc = int((root / 'quicksafe-build.exit').read_text())
+          patterns = [r'(?m)^Traceback \(most recent call last\):',
+                      r'(?m)^(?:FileNotFoundError|ModuleNotFoundError|ImportError|RuntimeError|OSError|CMake Error|ninja: error|make: \*\*\*)\b',
+                      r'(?m)^unknown error\s*$']
+          matched = [p for p in patterns if re.search(p, log)]
+          result = {'process_exit': rc, 'fatal_patterns': matched,
+                    'build_healthy': rc == 0 and not matched}
+          (root / 'quicksafe-build-health.json').write_text(json.dumps(result, indent=2))
+          print('QUICKSAFE_BUILD_HEALTH=' + json.dumps(result), flush=True)
+          if not result['build_healthy']:
+              raise SystemExit(1)
+          PYBUILD
+          echo 'QUICKSAFE_BUILD_CLI_AND_LOG=PASS'
 
       - name: '09 - Inspect genuine QuickSafe artifacts'
         if: steps.quicksafe_build.outcome == 'success'
+        id: quicksafe_artifacts
         shell: bash
         run: |
           set -euo pipefail
-          {
-            find QuickSafe/quicksafe -type f \
-              \( -name '*.so' -o -name '*.bc' -o -name '*.ll' -o -name 'libcalls' \) \
-              -print | head -250
-          } 2>&1 | tee results/quicksafe-artifacts.log
+          python3 - <<'PYART'
+          from pathlib import Path
+          import json
+          root = Path('QuickSafe/quicksafe')
+          matches = sorted(str(p) for p in root.rglob('*') if p.is_file() and
+                           (p.suffix in {'.so', '.bc', '.ll'} or p.name == 'libcalls'))
+          Path('results/quicksafe-artifacts.log').write_text('\n'.join(matches) + '\n')
+          print('ARTIFACT_COUNT=', len(matches))
+          for item in matches[:250]:
+              print(item)
+          # Inventory alone is not proof of a valid instrumented build.
+          # The run step will additionally check the CLI output for failures.
+          if not matches:
+              print('ERROR: No candidate QuickSafe build artifacts found')
+              raise SystemExit(1)
+          PYART
 
-      - name: '10 - Run actual QuickSafe LibCalls instance'
+      - name: '10 - Run actual QuickSafe LibCalls instance with traceback detection'
         id: quicksafe_run
-        if: steps.quicksafe_build.outcome == 'success'
+        if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -418,8 +472,25 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           echo "$rc" > ../../results/quicksafe-run.exit
-          echo "QUICKSAFE_RUN_EXIT=$rc"
-          exit "$rc"
+          python3 - <<'PYRUN'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('../../results')
+          log = (root / 'quicksafe-run.log').read_text(errors='replace')
+          rc = int((root / 'quicksafe-run.exit').read_text())
+          patterns = [r'(?m)^Traceback \(most recent call last\):',
+                      r'(?m)^(?:FileNotFoundError|ModuleNotFoundError|ImportError|RuntimeError|OSError)\b',
+                      r'(?m)^unknown error\s*$']
+          matched = [p for p in patterns if re.search(p, log)]
+          result = {'process_exit': rc, 'fatal_patterns': matched,
+                    'run_healthy': rc == 0 and not matched}
+          (root / 'quicksafe-run-health.json').write_text(json.dumps(result, indent=2))
+          print('QUICKSAFE_RUN_HEALTH=' + json.dumps(result), flush=True)
+          if not result['run_healthy']:
+              raise SystemExit(1)
+          PYRUN
+          echo 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'
 
       - name: '11 - Publish unambiguous verdict'
         if: always()
@@ -435,13 +506,18 @@ jobs:
               return int(p.read_text().strip()) if p.exists() else None
           p = out / 'guard-summary.json'
           control = json.loads(p.read_text()) if p.exists() else {}
+          def health(name, field):
+              p = out / name
+              return json.loads(p.read_text()).get(field, False) if p.exists() else False
           report = {
               'control_passed': control.get('passed') == 6 and control.get('failed') == 0,
               'official_quicksafe_build_exit': exit_code('quicksafe-build.exit'),
+              'official_quicksafe_build_verified': health('quicksafe-build-health.json', 'build_healthy'),
               'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
+              'official_quicksafe_run_verified': health('quicksafe-run-health.json', 'run_healthy'),
               'quicksafe_guard_bypass_tested': False,
               'quicksafe_vulnerability_confirmed': False,
-              'note': 'The six GDB tests use a separate, unprotected control target. '
+              'note': 'CLI exit codes alone are not evidence of success. The six GDB tests use a separate, unprotected control target. '
                       'Building/running LibCalls does not test a QuickSafe guard-page bypass.'
           }
           (out / 'final-verdict.json').write_text(json.dumps(report, indent=2))
@@ -456,7 +532,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v6
+          name: quicksafe-ultraverbose-v8
           path: |
             results/
             guard_control.c
