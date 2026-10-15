@@ -1,5 +1,5 @@
 name: QuickSafe v25 protected guard-jump read/write diagnostics
-true:
+on:
   push: null
   pull_request: null
   workflow_dispatch: null
