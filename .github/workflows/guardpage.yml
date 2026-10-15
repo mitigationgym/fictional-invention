@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v10 - Command 127 Forensics and Fail-Closed Verification
+name: QuickSafe Ultra Verbose Research v11 - Install ccache and Fail-Closed Verification
 
 on:
   push:
@@ -45,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential binutils clang-16 llvm-16 llvm-16-dev lld-16 \
-            cmake ninja-build git gdb python3 python3-pip python3-venv \
+            cmake ninja-build ccache git gdb python3 python3-pip python3-venv \
             python3-dev pkg-config libunwind-dev libelf-dev libdw-dev \
             libzstd-dev libssl-dev zlib1g-dev curl file
           {
@@ -54,9 +54,25 @@ jobs:
             llvm-config-16 --version
             cmake --version
             ninja --version
+            command -v ccache
+            ccache --version
             gdb --version
             python3 --version
           } 2>&1 | tee results/native-toolchain.log
+
+      - name: '02a - Verify required CMake compiler launcher'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== QuickSafePass requires ccache as its compiler launcher ==='
+          command -v ccache
+          ccache --version
+          command -v /usr/lib/llvm-16/bin/clang
+          command -v /usr/lib/llvm-16/bin/clang++
+          printf 'int main(void) { return 0; }\n' > /tmp/quicksafe-ccache-smoke.c
+          ccache /usr/lib/llvm-16/bin/clang -c /tmp/quicksafe-ccache-smoke.c -o /tmp/quicksafe-ccache-smoke.o
+          test -s /tmp/quicksafe-ccache-smoke.o
+          ccache -s
 
       - name: '02b - Verify LLVM 16 installation and QuickSafe expected llvm-config path'
         shell: bash
@@ -419,7 +435,7 @@ jobs:
           echo '=== Build executable and PATH diagnostics ==='
           {
             printf 'PATH=%s\n' "$PATH"
-            for exe in cmake ninja make clang clang++ clang-16 clang++-16 llvm-config llvm-config-16 ld.lld ld.lld-16; do
+            for exe in ccache cmake ninja make clang clang++ clang-16 clang++-16 llvm-config llvm-config-16 ld.lld ld.lld-16; do
               command -v "$exe" || true
             done
             ls -l /usr/lib/llvm-16/bin/ld /usr/lib/llvm-16/bin/ld.lld || true
@@ -587,7 +603,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v10
+          name: quicksafe-ultraverbose-v11
           path: |
             results/
             guard_control.c
