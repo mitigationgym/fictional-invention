@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v9 - Native Build Diagnostics and Fail-Closed Verification
+name: QuickSafe Ultra Verbose Research v10 - Command 127 Forensics and Fail-Closed Verification
 
 on:
   push:
@@ -102,7 +102,7 @@ jobs:
           assert Q.positive(3) is not None
           print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
-          echo "WORKFLOW_REVISION=v9-native-build-diagnostics" >> "$GITHUB_ENV"
+          echo "WORKFLOW_REVISION=v10-command-127-forensics" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -126,7 +126,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'WORKFLOW_REVISION=v9-native-build-diagnostics'
+          echo 'WORKFLOW_REVISION=v10-command-127-forensics'
           python3 - <<'PYFIX'
           from pathlib import Path
           import ast
@@ -416,7 +416,16 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           echo "$rc" > ../../results/quicksafe-build.exit
-          echo '=== CMake diagnostics for QuickSafePass ==='
+          echo '=== Build executable and PATH diagnostics ==='
+          {
+            printf 'PATH=%s\n' "$PATH"
+            for exe in cmake ninja make clang clang++ clang-16 clang++-16 llvm-config llvm-config-16 ld.lld ld.lld-16; do
+              command -v "$exe" || true
+            done
+            ls -l /usr/lib/llvm-16/bin/ld /usr/lib/llvm-16/bin/ld.lld || true
+          } > ../../results/quicksafe-build-tools.log 2>&1
+          cat ../../results/quicksafe-build-tools.log
+          echo '=== CMake diagnostics for QuickSafePass ===' 
           pass_build='build/packages/QuickSafePass/build'
           if [ -d "$pass_build" ]; then
             find "$pass_build" -maxdepth 4 -type f \
@@ -437,6 +446,18 @@ jobs:
               set -e
               echo "$cmake_rc" > ../../results/quicksafe-cmake-reproduction.exit
               cat ../../results/quicksafe-cmake-reproduction.log
+              echo '=== Inspect generated CMake build commands ==='
+              if [ -f "$pass_build/build.ninja" ]; then
+                ninja -C "$pass_build" -t commands > ../../results/quicksafe-generated-commands.log 2>&1 || true
+                ninja -C "$pass_build" -n -v > ../../results/quicksafe-build-dry-run.log 2>&1 || true
+              elif [ -f "$pass_build/Makefile" ]; then
+                make -C "$pass_build" -n VERBOSE=1 > ../../results/quicksafe-build-dry-run.log 2>&1 || true
+              fi
+              if [ -f ../../results/quicksafe-generated-commands.log ]; then
+                sed -n '1,100p' ../../results/quicksafe-generated-commands.log
+              fi
+              echo '=== Reproduction log tail ==='
+              tail -n 100 ../../results/quicksafe-cmake-reproduction.log
             fi
           fi
           python3 - <<'PYBUILD'
@@ -459,7 +480,8 @@ jobs:
           result = {'process_exit': rc, 'fatal_patterns': matched,
                     'quicksafe_pass_install_exists': install.is_dir(),
                     'quicksafe_pass_artifacts': pass_artifacts,
-                    'build_healthy': healthy}
+                    'build_healthy': healthy,
+                    'cmake_reproduction_exit': int((root / 'quicksafe-cmake-reproduction.exit').read_text()) if (root / 'quicksafe-cmake-reproduction.exit').exists() else None}
           (root / 'quicksafe-build-health.json').write_text(json.dumps(result, indent=2))
           print('QUICKSAFE_BUILD_HEALTH=' + json.dumps(result), flush=True)
           if not healthy:
@@ -565,7 +587,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v9
+          name: quicksafe-ultraverbose-v10
           path: |
             results/
             guard_control.c
