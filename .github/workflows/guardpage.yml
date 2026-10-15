@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v5 - Missing Optional SPEC2006 Module Fix
+name: QuickSafe Ultra Verbose Research v6 - Comprehensive Import Audit and Optional SPEC Repair
 
 on:
   push:
@@ -77,7 +77,7 @@ jobs:
           assert Q.positive(3) is not None
           print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
-          echo "WORKFLOW_REVISION=v5-optional-spec2006-fix" >> "$GITHUB_ENV"
+          echo "WORKFLOW_REVISION=v6-import-audit" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -97,42 +97,77 @@ jobs:
             find quicksafe -maxdepth 3 -type f | sort | head -200
           } 2>&1 | tee ../results/source-inventory.log
 
-      - name: '04b - Repair upstream infra missing optional SPEC2006 module'
+      - name: '04b - Audit all local Python imports and repair absent optional SPEC targets'
         shell: bash
         run: |
           set -euo pipefail
-          echo 'WORKFLOW_REVISION=v5-optional-spec2006-fix'
+          echo 'WORKFLOW_REVISION=v6-import-audit'
           python3 - <<'PYFIX'
           from pathlib import Path
+          import ast
+          import json
           import re
           import subprocess
           import sys
-          root = Path('QuickSafe/quicksafe/infra/infra/targets')
-          init = root / '__init__.py'
-          assert init.is_file(), f'Missing expected infra target initializer: {init}'
-          original = init.read_text()
-          print('=== ORIGINAL INFRA TARGET IMPORTS ===')
-          print(original)
-          print('=== TRACKED SPEC2006 FILES ===')
-          subprocess.run(['git', '-C', 'QuickSafe', 'ls-files', '*spec2006*'], check=True)
-          if (root / 'spec2006.py').exists() or (root / 'spec2006' / '__init__.py').exists():
-              print('SPEC2006 module exists; no patch needed')
-          else:
-              pattern = r'(?m)^(\s*)from \.spec2006 import SPEC2006\s*$'
-              matches = re.findall(pattern, original)
-              if len(matches) != 1:
-                  raise RuntimeError('Unexpected upstream targets/__init__.py; refusing unsafe patch')
-              replacement = ('# CI compatibility: upstream imports an absent optional SPEC2006 target.\n'
-                             '# No SPEC2006 benchmark is used by this workflow.\n')
-              updated = re.sub(pattern, lambda m: replacement.rstrip('\n'), original, count=1)
-              init.write_text(updated)
-              print('PATCH_APPLIED=skip_missing_optional_SPEC2006')
-          import py_compile
-          py_compile.compile(str(init), doraise=True)
-          print('INFRA_TARGETS_SYNTAX=PASS')
+
+          repo = Path('QuickSafe/quicksafe')
+          infra = repo / 'infra' / 'infra'
+          target_dir = infra / 'targets'
+          initializer = target_dir / '__init__.py'
+          assert initializer.is_file(), initializer
+          original = initializer.read_text()
+          lines = original.splitlines(keepends=True)
+          removed = []
+          retained = []
+          for line in lines:
+              match = re.fullmatch(r'(\s*)from \.(spec[0-9A-Za-z_]*) import ([A-Za-z_][A-Za-z_0-9]*)\s*', line.rstrip('\n'))
+              if match:
+                  name = match.group(2)
+                  exists = (target_dir / (name + '.py')).is_file() or (target_dir / name / '__init__.py').is_file()
+                  if not exists:
+                      removed.append(line.strip())
+                      retained.append('# CI: skipped absent optional SPEC benchmark module: ' + line.strip() + '\n')
+                      continue
+              retained.append(line)
+          patched = ''.join(retained)
+          ast.parse(patched, filename=str(initializer))
+          initializer.write_text(patched)
+
+          # Audit every Python source file for syntactically valid imports and
+          # report unresolved relative imports without deleting unrelated code.
+          files = sorted(repo.rglob('*.py'))
+          parse_errors = []
+          missing_relative = []
+          for file in files:
+              try:
+                  tree = ast.parse(file.read_text(encoding='utf-8-sig'), filename=str(file))
+              except (SyntaxError, UnicodeError) as exc:
+                  parse_errors.append({'file': str(file), 'error': str(exc)})
+                  continue
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.ImportFrom) or not node.level or not node.module:
+                      continue
+                  # Resolve relative imports relative to the importing package.
+                  base = file.parent
+                  for _ in range(node.level - 1):
+                      base = base.parent
+                  module = base.joinpath(*node.module.split('.'))
+                  if not (module.with_suffix('.py').is_file() or (module / '__init__.py').is_file()):
+                      missing_relative.append({'file': str(file), 'line': node.lineno,
+                                               'module': '.' * node.level + node.module})
+          report = {'python_files_scanned': len(files),
+                    'optional_spec_imports_removed': removed,
+                    'parse_errors': parse_errors,
+                    'unresolved_relative_imports': missing_relative}
+          Path('results/import-audit.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          if parse_errors:
+              print('WARNING: Some upstream Python sources did not parse; see audit.', file=sys.stderr)
           PYFIX
           git -C QuickSafe diff -- quicksafe/infra/infra/targets/__init__.py \
             2>&1 | tee results/infra-compatibility.patch
+          echo '=== All infra target imports after compatibility repair ==='
+          sed -n '1,180p' QuickSafe/quicksafe/infra/infra/targets/__init__.py
 
       - name: '05 - Validate QuickSafe imports and CLI before building'
         shell: bash
@@ -388,7 +423,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v5
+          name: quicksafe-ultraverbose-v6
           path: |
             results/
             guard_control.c
