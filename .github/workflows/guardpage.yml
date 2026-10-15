@@ -1,5 +1,5 @@
-name: QuickSafe v24 protected guard-jump read/write diagnostics
-on:
+name: QuickSafe v25 protected guard-jump read/write diagnostics
+true:
   push: null
   pull_request: null
   workflow_dispatch: null
@@ -19,16 +19,17 @@ jobs:
     steps:
     - name: 01 - Host and security diagnostics
       shell: bash
-      run: "set -euo pipefail\nmkdir -p results\n{\n  date -u\n  uname -a\n  cat /etc/os-release\n  getconf PAGE_SIZE\n  id\n\
-        \  ulimit -a\n  cat /proc/sys/kernel/yama/ptrace_scope || true\n  cat /proc/sys/kernel/randomize_va_space || true\n\
-        \  df -h\n  free -h\n} 2>&1 | tee results/host.log\n"
+      run: "set -euo pipefail\nmkdir -p results\n{\n  date -u\n  uname -a\n  cat /etc/os-release\n  getconf PAGE_SIZE\n\
+        \  id\n  ulimit -a\n  cat /proc/sys/kernel/yama/ptrace_scope || true\n  cat /proc/sys/kernel/randomize_va_space\
+        \ || true\n  df -h\n  free -h\n} 2>&1 | tee results/host.log\n"
     - name: 02 - Install native dependencies
       shell: bash
-      run: "set -euo pipefail\nsudo apt-get update\nsudo apt-get install -y \\\n  build-essential binutils clang-16 llvm-16\
-        \ llvm-16-dev lld-16 \\\n  cmake ninja-build ccache git gdb python3 python3-pip python3-venv \\\n  python3-dev pkg-config\
-        \ libunwind-dev libelf-dev libdw-dev \\\n  libzstd-dev libssl-dev zlib1g-dev curl file\n{\n  gcc --version\n  clang-16\
-        \ --version\n  llvm-config-16 --version\n  cmake --version\n  ninja --version\n  command -v ccache\n  ccache --version\n\
-        \  gdb --version\n  python3 --version\n} 2>&1 | tee results/native-toolchain.log\n"
+      run: "set -euo pipefail\nsudo apt-get update\nsudo apt-get install -y \\\n  build-essential binutils clang-16\
+        \ llvm-16 llvm-16-dev lld-16 \\\n  cmake ninja-build ccache git gdb python3 python3-pip python3-venv \\\n\
+        \  python3-dev pkg-config libunwind-dev libelf-dev libdw-dev \\\n  libzstd-dev libssl-dev zlib1g-dev curl\
+        \ file\n{\n  gcc --version\n  clang-16 --version\n  llvm-config-16 --version\n  cmake --version\n  ninja\
+        \ --version\n  command -v ccache\n  ccache --version\n  gdb --version\n  python3 --version\n} 2>&1 | tee\
+        \ results/native-toolchain.log\n"
     - name: 02a - Verify required CMake compiler launcher
       shell: bash
       run: 'set -euo pipefail
@@ -55,644 +56,724 @@ jobs:
     - name: 02b - Verify LLVM 16 installation and QuickSafe expected llvm-config path
       shell: bash
       run: "set -euo pipefail\necho '=== LLVM 16 path compatibility ==='\ncommand -v llvm-config-16\ntest -x /usr/bin/llvm-config-16\n\
-        test \"$(/usr/bin/llvm-config-16 --version)\" = '16.0.6'\nif [ -e /usr/local/bin/llvm-config ] && [ ! -L /usr/local/bin/llvm-config\
-        \ ]; then\n  echo 'ERROR: /usr/local/bin/llvm-config already exists and is not a symlink' >&2\n  exit 1\nfi\nsudo\
-        \ ln -sfn /usr/bin/llvm-config-16 /usr/local/bin/llvm-config\ntest -x /usr/local/bin/llvm-config\ntest \"$(/usr/local/bin/llvm-config\
-        \ --version)\" = '16.0.6'\n{\n  ls -l /usr/local/bin/llvm-config /usr/bin/llvm-config-16\n  /usr/local/bin/llvm-config\
-        \ --version\n  /usr/local/bin/llvm-config --bindir\n  /usr/local/bin/llvm-config --libdir\n  /usr/local/bin/llvm-config\
-        \ --includedir\n  /usr/local/bin/llvm-config --cmakedir\n  clang-16 --version\n} 2>&1 | tee results/llvm-path-check.log\n"
+        test \"$(/usr/bin/llvm-config-16 --version)\" = '16.0.6'\nif [ -e /usr/local/bin/llvm-config ] && [ ! -L\
+        \ /usr/local/bin/llvm-config ]; then\n  echo 'ERROR: /usr/local/bin/llvm-config already exists and is not\
+        \ a symlink' >&2\n  exit 1\nfi\nsudo ln -sfn /usr/bin/llvm-config-16 /usr/local/bin/llvm-config\ntest -x\
+        \ /usr/local/bin/llvm-config\ntest \"$(/usr/local/bin/llvm-config --version)\" = '16.0.6'\n{\n  ls -l /usr/local/bin/llvm-config\
+        \ /usr/bin/llvm-config-16\n  /usr/local/bin/llvm-config --version\n  /usr/local/bin/llvm-config --bindir\n\
+        \  /usr/local/bin/llvm-config --libdir\n  /usr/local/bin/llvm-config --includedir\n  /usr/local/bin/llvm-config\
+        \ --cmakedir\n  clang-16 --version\n} 2>&1 | tee results/llvm-path-check.log\n"
     - name: 03 - Create persistent Python environment and install modules
       shell: bash
-      run: "set -euo pipefail\npython3 -m venv \"$GITHUB_WORKSPACE/.venv\"\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip\
-        \ install --upgrade pip setuptools wheel\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip install \\\n  'sympy==1.14.0'\
-        \ numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' 'argcomplete>=3,<5' colorlog terminaltables packaging\
-        \ psutil pyelftools\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip check\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -\
-        \ <<'PY'\nimport sys\nimport sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, colorlog, terminaltables,\
-        \ packaging, psutil, elftools\nfrom sympy import Q\nprint('PYTHON_EXECUTABLE=', sys.executable)\nfor mod in (sympy,\
-        \ numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, colorlog, terminaltables, packaging, psutil, elftools):\n\
-        \    print('IMPORT_OK=', mod.__name__, getattr(mod, '__version__', 'unknown'))\nassert Q.positive(3) is not None\n\
-        print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')\nPY\necho \"WORKFLOW_REVISION=v22-guard-jump-writes\" >> \"$GITHUB_ENV\"\n\
-        echo \"$GITHUB_WORKSPACE/.venv/bin\" >> \"$GITHUB_PATH\"\necho \"QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python\"\
-        \ >> \"$GITHUB_ENV\"\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip freeze | tee results/python-freeze.log\n"
+      run: "set -euo pipefail\npython3 -m venv \"$GITHUB_WORKSPACE/.venv\"\n\"$GITHUB_WORKSPACE/.venv/bin/python\"\
+        \ -m pip install --upgrade pip setuptools wheel\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip install \\\
+        \n  'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' 'argcomplete>=3,<5'\
+        \ colorlog terminaltables packaging psutil pyelftools\n\"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip check\n\
+        \"$GITHUB_WORKSPACE/.venv/bin/python\" - <<'PY'\nimport sys\nimport sympy, numpy, scipy, networkx, yaml,\
+        \ pytest, z3, requests, argcomplete, colorlog, terminaltables, packaging, psutil, elftools\nfrom sympy import\
+        \ Q\nprint('PYTHON_EXECUTABLE=', sys.executable)\nfor mod in (sympy, numpy, scipy, networkx, yaml, pytest,\
+        \ z3, requests, argcomplete, colorlog, terminaltables, packaging, psutil, elftools):\n    print('IMPORT_OK=',\
+        \ mod.__name__, getattr(mod, '__version__', 'unknown'))\nassert Q.positive(3) is not None\nprint('QUICKSAFE_SYMPY_Q_IMPORT=PASS')\n\
+        PY\necho \"WORKFLOW_REVISION=v25-guard-jump-evidence\" >> \"$GITHUB_ENV\"\necho \"$GITHUB_WORKSPACE/.venv/bin\"\
+        \ >> \"$GITHUB_PATH\"\necho \"QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python\" >> \"$GITHUB_ENV\"\n\
+        \"$GITHUB_WORKSPACE/.venv/bin/python\" -m pip freeze | tee results/python-freeze.log\n"
     - name: 04 - Clone official QuickSafe recursively
       shell: bash
-      run: "set -euo pipefail\ngit clone --recursive \"$QS_REPO\" QuickSafe 2>&1 | tee results/clone.log\ncd QuickSafe\ngit\
-        \ checkout \"$QS_REF\"\ngit submodule update --init --recursive 2>&1 | tee ../results/submodules.log\n{\n  git rev-parse\
-        \ HEAD\n  git status --short\n  git submodule status --recursive\n  find quicksafe -maxdepth 3 -type f | sort | head\
-        \ -200\n} 2>&1 | tee ../results/source-inventory.log\n"
+      run: "set -euo pipefail\ngit clone --recursive \"$QS_REPO\" QuickSafe 2>&1 | tee results/clone.log\ncd QuickSafe\n\
+        git checkout \"$QS_REF\"\ngit submodule update --init --recursive 2>&1 | tee ../results/submodules.log\n\
+        {\n  git rev-parse HEAD\n  git status --short\n  git submodule status --recursive\n  find quicksafe -maxdepth\
+        \ 3 -type f | sort | head -200\n} 2>&1 | tee ../results/source-inventory.log\n"
     - name: 04b - Audit all local Python imports and repair absent optional SPEC targets
       shell: bash
-      run: "set -euo pipefail\necho 'WORKFLOW_REVISION=v22-guard-jump-writes'\npython3 - <<'PYFIX'\nfrom pathlib import Path\n\
-        import ast\nimport json\nimport re\nimport subprocess\nimport sys\n\nrepo = Path('QuickSafe/quicksafe')\ninfra = repo\
-        \ / 'infra' / 'infra'\ntarget_dir = infra / 'targets'\ninitializer = target_dir / '__init__.py'\nassert initializer.is_file(),\
-        \ initializer\noriginal = initializer.read_text()\nlines = original.splitlines(keepends=True)\nremoved = []\nretained\
-        \ = []\nfor line in lines:\n    match = re.fullmatch(r'(\\s*)from \\.(spec[0-9A-Za-z_]*) import ([A-Za-z_][A-Za-z_0-9]*)\\\
-        s*', line.rstrip('\\n'))\n    if match:\n        name = match.group(2)\n        exists = (target_dir / (name + '.py')).is_file()\
-        \ or (target_dir / name / '__init__.py').is_file()\n        if not exists:\n            removed.append(line.strip())\n\
-        \            retained.append('# CI: skipped absent optional SPEC benchmark module: ' + line.strip() + '\\n')\n   \
-        \         continue\n    retained.append(line)\npatched = ''.join(retained)\nast.parse(patched, filename=str(initializer))\n\
-        initializer.write_text(patched)\n\n# Audit every Python source file for syntactically valid imports and\n# report\
-        \ unresolved relative imports without deleting unrelated code.\nfiles = sorted(repo.rglob('*.py'))\nparse_errors =\
-        \ []\nmissing_relative = []\nfor file in files:\n    try:\n        tree = ast.parse(file.read_text(encoding='utf-8-sig'),\
-        \ filename=str(file))\n    except (SyntaxError, UnicodeError) as exc:\n        parse_errors.append({'file': str(file),\
-        \ 'error': str(exc)})\n        continue\n    for node in ast.walk(tree):\n        if not isinstance(node, ast.ImportFrom)\
-        \ or not node.level or not node.module:\n            continue\n        # Resolve relative imports relative to the\
-        \ importing package.\n        base = file.parent\n        for _ in range(node.level - 1):\n            base = base.parent\n\
-        \        module = base.joinpath(*node.module.split('.'))\n        if not (module.with_suffix('.py').is_file() or (module\
-        \ / '__init__.py').is_file()):\n            missing_relative.append({'file': str(file), 'line': node.lineno,\n   \
-        \                                  'module': '.' * node.level + node.module})\nreport = {'python_files_scanned': len(files),\n\
-        \          'optional_spec_imports_removed': removed,\n          'parse_errors': parse_errors,\n          'unresolved_relative_imports':\
-        \ missing_relative}\nPath('results/import-audit.json').write_text(json.dumps(report, indent=2))\n# Inventory third-party\
-        \ imports in the primary QuickSafe Python sources.\n# This is diagnostic: some imports are optional or dynamically\
-        \ resolved.\nimport importlib.util\nimport sysconfig\nroots = [repo / 'setup.py', *sorted((repo / 'targets').rglob('*.py')),\n\
-        \         *sorted((repo / 'instances').rglob('*.py')),\n         *sorted((repo / 'packages').rglob('*.py')),\n   \
-        \      *sorted((repo / 'infra' / 'infra').rglob('*.py'))]\ntop_imports = set()\nfor source in roots:\n    try:\n \
-        \       parsed = ast.parse(source.read_text(encoding='utf-8-sig'))\n    except (SyntaxError, UnicodeError):\n    \
-        \    continue\n    for node in ast.walk(parsed):\n        if isinstance(node, ast.Import):\n            top_imports.update(alias.name.split('.')[0]\
-        \ for alias in node.names)\n        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:\n \
-        \           top_imports.add(node.module.split('.')[0])\nlocal_names = {'infra', 'targets', 'instances', 'packages',\
-        \ 'tools'}\nunresolved = []\nfor name in sorted(top_imports - local_names - sys.stdlib_module_names):\n    try:\n\
-        \        if importlib.util.find_spec(name) is None:\n            unresolved.append(name)\n    except Exception as\
-        \ exc:\n        unresolved.append(f'{name}: {type(exc).__name__}: {exc}')\nreport['absolute_imports_unresolved_or_optional']\
-        \ = unresolved\nPath('results/import-audit.json').write_text(json.dumps(report, indent=2))\nprint(json.dumps(report,\
-        \ indent=2))\nif unresolved:\n    print('WARNING: unresolved static imports (may be optional):', unresolved)\nif parse_errors:\n\
-        \    print('WARNING: Some upstream Python sources did not parse; see audit.', file=sys.stderr)\nPYFIX\ngit -C QuickSafe\
-        \ diff -- quicksafe/infra/infra/targets/__init__.py \\\n  2>&1 | tee results/infra-compatibility.patch\necho '===\
-        \ All infra target imports after compatibility repair ==='\nsed -n '1,180p' QuickSafe/quicksafe/infra/infra/targets/__init__.py\n"
+      run: "set -euo pipefail\necho 'WORKFLOW_REVISION=v25-guard-jump-evidence'\npython3 - <<'PYFIX'\nfrom pathlib\
+        \ import Path\nimport ast\nimport json\nimport re\nimport subprocess\nimport sys\n\nrepo = Path('QuickSafe/quicksafe')\n\
+        infra = repo / 'infra' / 'infra'\ntarget_dir = infra / 'targets'\ninitializer = target_dir / '__init__.py'\n\
+        assert initializer.is_file(), initializer\noriginal = initializer.read_text()\nlines = original.splitlines(keepends=True)\n\
+        removed = []\nretained = []\nfor line in lines:\n    match = re.fullmatch(r'(\\s*)from \\.(spec[0-9A-Za-z_]*)\
+        \ import ([A-Za-z_][A-Za-z_0-9]*)\\s*', line.rstrip('\\n'))\n    if match:\n        name = match.group(2)\n\
+        \        exists = (target_dir / (name + '.py')).is_file() or (target_dir / name / '__init__.py').is_file()\n\
+        \        if not exists:\n            removed.append(line.strip())\n            retained.append('# CI: skipped\
+        \ absent optional SPEC benchmark module: ' + line.strip() + '\\n')\n            continue\n    retained.append(line)\n\
+        patched = ''.join(retained)\nast.parse(patched, filename=str(initializer))\ninitializer.write_text(patched)\n\
+        \n# Audit every Python source file for syntactically valid imports and\n# report unresolved relative imports\
+        \ without deleting unrelated code.\nfiles = sorted(repo.rglob('*.py'))\nparse_errors = []\nmissing_relative\
+        \ = []\nfor file in files:\n    try:\n        tree = ast.parse(file.read_text(encoding='utf-8-sig'), filename=str(file))\n\
+        \    except (SyntaxError, UnicodeError) as exc:\n        parse_errors.append({'file': str(file), 'error':\
+        \ str(exc)})\n        continue\n    for node in ast.walk(tree):\n        if not isinstance(node, ast.ImportFrom)\
+        \ or not node.level or not node.module:\n            continue\n        # Resolve relative imports relative\
+        \ to the importing package.\n        base = file.parent\n        for _ in range(node.level - 1):\n     \
+        \       base = base.parent\n        module = base.joinpath(*node.module.split('.'))\n        if not (module.with_suffix('.py').is_file()\
+        \ or (module / '__init__.py').is_file()):\n            missing_relative.append({'file': str(file), 'line':\
+        \ node.lineno,\n                                     'module': '.' * node.level + node.module})\nreport\
+        \ = {'python_files_scanned': len(files),\n          'optional_spec_imports_removed': removed,\n        \
+        \  'parse_errors': parse_errors,\n          'unresolved_relative_imports': missing_relative}\nPath('results/import-audit.json').write_text(json.dumps(report,\
+        \ indent=2))\n# Inventory third-party imports in the primary QuickSafe Python sources.\n# This is diagnostic:\
+        \ some imports are optional or dynamically resolved.\nimport importlib.util\nimport sysconfig\nroots = [repo\
+        \ / 'setup.py', *sorted((repo / 'targets').rglob('*.py')),\n         *sorted((repo / 'instances').rglob('*.py')),\n\
+        \         *sorted((repo / 'packages').rglob('*.py')),\n         *sorted((repo / 'infra' / 'infra').rglob('*.py'))]\n\
+        top_imports = set()\nfor source in roots:\n    try:\n        parsed = ast.parse(source.read_text(encoding='utf-8-sig'))\n\
+        \    except (SyntaxError, UnicodeError):\n        continue\n    for node in ast.walk(parsed):\n        if\
+        \ isinstance(node, ast.Import):\n            top_imports.update(alias.name.split('.')[0] for alias in node.names)\n\
+        \        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:\n            top_imports.add(node.module.split('.')[0])\n\
+        local_names = {'infra', 'targets', 'instances', 'packages', 'tools'}\nunresolved = []\nfor name in sorted(top_imports\
+        \ - local_names - sys.stdlib_module_names):\n    try:\n        if importlib.util.find_spec(name) is None:\n\
+        \            unresolved.append(name)\n    except Exception as exc:\n        unresolved.append(f'{name}:\
+        \ {type(exc).__name__}: {exc}')\nreport['absolute_imports_unresolved_or_optional'] = unresolved\nPath('results/import-audit.json').write_text(json.dumps(report,\
+        \ indent=2))\nprint(json.dumps(report, indent=2))\nif unresolved:\n    print('WARNING: unresolved static\
+        \ imports (may be optional):', unresolved)\nif parse_errors:\n    print('WARNING: Some upstream Python sources\
+        \ did not parse; see audit.', file=sys.stderr)\nPYFIX\ngit -C QuickSafe diff -- quicksafe/infra/infra/targets/__init__.py\
+        \ \\\n  2>&1 | tee results/infra-compatibility.patch\necho '=== All infra target imports after compatibility\
+        \ repair ==='\nsed -n '1,180p' QuickSafe/quicksafe/infra/infra/targets/__init__.py\n"
     - name: 05 - Validate QuickSafe imports and CLI before building
       shell: bash
-      run: "set -euo pipefail\necho \"WORKFLOW_REVISION=${WORKFLOW_REVISION:-missing}\"\ncommand -v python3\npython3 -m pip\
-        \ show requests sympy argcomplete\npython3 - <<'PY'\nimport sys\nfrom sympy import Q\nprint('PYTHON=', sys.executable)\n\
-        print('SYMPY_Q=', Q.positive(3))\nassert '/.venv/bin/' in sys.executable, 'Workflow is not using its venv'\nPY\ncd\
-        \ QuickSafe/quicksafe\ntest -f infra/infra/__init__.py\necho \"PYTHONPATH=$PYTHONPATH\"\npython3 - <<'PY'\nfrom infra\
-        \ import Setup\nimport infra\nimport requests\nimport argcomplete\nprint('ARGCOMPLETE_PATH=', argcomplete.__file__)\n\
-        print('QUICKSAFE_SETUP_IMPORT=PASS')\nprint('SETUP=', Setup)\nprint('QUICKSAFE_INFRA_PATH=', infra.__file__)\nassert\
-        \ infra.__file__, 'Imported namespace instead of actual QuickSafe infra package'\nassert infra.__file__.endswith('/infra/infra/__init__.py'),\
-        \ infra.__file__\nprint('REQUESTS_VERSION=', requests.__version__)\nPY\n# Verify the exact setup.py import chain before\
-        \ attempting any CLI commands.\npython3 -c 'from infra import Setup; import requests, argcomplete; from sympy import\
-        \ Q; print(\"QUICKSAFE_SETUP_IMPORT_CHAIN=PASS\")' \\\n  2>&1 | tee ../../results/setup-import-check.log\npython3\
-        \ setup.py --help 2>&1 | tee ../../results/setup-help.log\npython3 setup.py build --help 2>&1 | tee ../../results/build-help.log\n\
-        python3 setup.py run --help 2>&1 | tee ../../results/run-help.log\ngrep -R -n -E 'qs-detection-mode|qs-mem-prot-mode|qs-track-accesses'\
+      run: "set -euo pipefail\necho \"WORKFLOW_REVISION=${WORKFLOW_REVISION:-missing}\"\ncommand -v python3\npython3\
+        \ -m pip show requests sympy argcomplete\npython3 - <<'PY'\nimport sys\nfrom sympy import Q\nprint('PYTHON=',\
+        \ sys.executable)\nprint('SYMPY_Q=', Q.positive(3))\nassert '/.venv/bin/' in sys.executable, 'Workflow is\
+        \ not using its venv'\nPY\ncd QuickSafe/quicksafe\ntest -f infra/infra/__init__.py\necho \"PYTHONPATH=$PYTHONPATH\"\
+        \npython3 - <<'PY'\nfrom infra import Setup\nimport infra\nimport requests\nimport argcomplete\nprint('ARGCOMPLETE_PATH=',\
+        \ argcomplete.__file__)\nprint('QUICKSAFE_SETUP_IMPORT=PASS')\nprint('SETUP=', Setup)\nprint('QUICKSAFE_INFRA_PATH=',\
+        \ infra.__file__)\nassert infra.__file__, 'Imported namespace instead of actual QuickSafe infra package'\n\
+        assert infra.__file__.endswith('/infra/infra/__init__.py'), infra.__file__\nprint('REQUESTS_VERSION=', requests.__version__)\n\
+        PY\n# Verify the exact setup.py import chain before attempting any CLI commands.\npython3 -c 'from infra\
+        \ import Setup; import requests, argcomplete; from sympy import Q; print(\"QUICKSAFE_SETUP_IMPORT_CHAIN=PASS\"\
+        )' \\\n  2>&1 | tee ../../results/setup-import-check.log\npython3 setup.py --help 2>&1 | tee ../../results/setup-help.log\n\
+        python3 setup.py build --help 2>&1 | tee ../../results/build-help.log\npython3 setup.py run --help 2>&1\
+        \ | tee ../../results/run-help.log\ngrep -R -n -E 'qs-detection-mode|qs-mem-prot-mode|qs-track-accesses'\
         \ instances packages 2>/dev/null \\\n  | head -100 > ../../results/quick-options.log || true\n"
     - name: 06 - Build standalone guard-page control binary
       shell: bash
       run: "set -euo pipefail\ncat > guard_control.c <<'C'\n#define _GNU_SOURCE\n#include <errno.h>\n#include <stdio.h>\n\
         #include <stdlib.h>\n#include <string.h>\n#include <sys/mman.h>\n#include <unistd.h>\n\n__attribute__((noinline))\
-        \ unsigned char monitored_read(volatile unsigned char *p) {\n    return *p;\n}\n\nint main(int argc, char **argv)\
-        \ {\n    setvbuf(stdout, NULL, _IONBF, 0);\n    if (argc != 3) return 10;\n    int strict = !strcmp(argv[1], \"strict\"\
-        );\n    if (!strict && strcmp(argv[1], \"weak\")) return 11;\n    char *end = NULL;\n    errno = 0;\n    unsigned\
-        \ long offset = strtoul(argv[2], &end, 10);\n    if (errno || end == argv[2] || *end) return 12;\n    long ps = sysconf(_SC_PAGESIZE);\n\
-        \    if (ps <= 0) return 13;\n    size_t page = (size_t)ps;\n    if (page > (size_t)-1 / 3) return 14;\n    size_t\
-        \ total = page * 3;\n    unsigned char *base = mmap(NULL, total, PROT_READ | PROT_WRITE,\n                       \
-        \        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n    if (base == MAP_FAILED) return 15;\n    base[0] = 0x11;\n    base[2\
-        \ * page] = 0x42;\n    if (mprotect(base + page, page, PROT_NONE)) return 16;\n    printf(\"PAGE_SIZE=%zu\\n\", page);\n\
-        \    printf(\"OBJECT_BASE=%p\\n\", (void *)base);\n    printf(\"OBJECT_END=%p\\n\", (void *)(base + page));\n    printf(\"\
-        GUARD_START=%p\\n\", (void *)(base + page));\n    printf(\"GUARD_END=%p\\n\", (void *)(base + 2 * page));\n    printf(\"\
+        \ unsigned char monitored_read(volatile unsigned char *p) {\n    return *p;\n}\n\nint main(int argc, char\
+        \ **argv) {\n    setvbuf(stdout, NULL, _IONBF, 0);\n    if (argc != 3) return 10;\n    int strict = !strcmp(argv[1],\
+        \ \"strict\");\n    if (!strict && strcmp(argv[1], \"weak\")) return 11;\n    char *end = NULL;\n    errno\
+        \ = 0;\n    unsigned long offset = strtoul(argv[2], &end, 10);\n    if (errno || end == argv[2] || *end)\
+        \ return 12;\n    long ps = sysconf(_SC_PAGESIZE);\n    if (ps <= 0) return 13;\n    size_t page = (size_t)ps;\n\
+        \    if (page > (size_t)-1 / 3) return 14;\n    size_t total = page * 3;\n    unsigned char *base = mmap(NULL,\
+        \ total, PROT_READ | PROT_WRITE,\n                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n\
+        \    if (base == MAP_FAILED) return 15;\n    base[0] = 0x11;\n    base[2 * page] = 0x42;\n    if (mprotect(base\
+        \ + page, page, PROT_NONE)) return 16;\n    printf(\"PAGE_SIZE=%zu\\n\", page);\n    printf(\"OBJECT_BASE=%p\\\
+        n\", (void *)base);\n    printf(\"OBJECT_END=%p\\n\", (void *)(base + page));\n    printf(\"GUARD_START=%p\\\
+        n\", (void *)(base + page));\n    printf(\"GUARD_END=%p\\n\", (void *)(base + 2 * page));\n    printf(\"\
         THIRD_PAGE=%p\\n\", (void *)(base + 2 * page));\n    printf(\"OFFSET=%lu\\n\", offset);\n    printf(\"POLICY=%s\\\
-        n\", strict ? \"STRICT\" : \"WEAK\");\n    if (offset >= total) { puts(\"RESULT=INVALID\"); return 17; }\n    if (strict\
-        \ && offset >= page) {\n        puts(\"BOUNDS=REJECT\"); puts(\"RESULT=BLOCKED\"); return 2;\n    }\n    puts(\"BOUNDS=ALLOW\"\
-        );\n    volatile unsigned char *p = base + offset;\n    printf(\"DEREFERENCE_TARGET=%p\\n\", (void *)p);\n    puts(\"\
-        DEREFERENCE_BEGIN\");\n    unsigned char value = monitored_read(p);\n    printf(\"READ_COMPLETED=0x%02x\\n\", value);\n\
-        \    puts(\"RESULT=READ_OK\");\n    return 0;\n}\nC\ngcc -O0 -g3 -Wall -Wextra -fno-inline -fno-omit-frame-pointer\
-        \ \\\n  -o guard_control guard_control.c\nfile guard_control | tee results/control-binary.log\nobjdump -d -M intel\
-        \ guard_control > results/control-disassembly.log\n"
+        n\", strict ? \"STRICT\" : \"WEAK\");\n    if (offset >= total) { puts(\"RESULT=INVALID\"); return 17; }\n\
+        \    if (strict && offset >= page) {\n        puts(\"BOUNDS=REJECT\"); puts(\"RESULT=BLOCKED\"); return\
+        \ 2;\n    }\n    puts(\"BOUNDS=ALLOW\");\n    volatile unsigned char *p = base + offset;\n    printf(\"\
+        DEREFERENCE_TARGET=%p\\n\", (void *)p);\n    puts(\"DEREFERENCE_BEGIN\");\n    unsigned char value = monitored_read(p);\n\
+        \    printf(\"READ_COMPLETED=0x%02x\\n\", value);\n    puts(\"RESULT=READ_OK\");\n    return 0;\n}\nC\n\
+        gcc -O0 -g3 -Wall -Wextra -fno-inline -fno-omit-frame-pointer \\\n  -o guard_control guard_control.c\nfile\
+        \ guard_control | tee results/control-binary.log\nobjdump -d -M intel guard_control > results/control-disassembly.log\n"
     - name: 07 - Execute six GDB-instrumented control cases
       shell: bash
-      run: "set -euo pipefail\ncat > monitor.py <<'PY'\nimport json\nimport pathlib\nimport re\nimport subprocess\nimport\
-        \ sys\n\nout = pathlib.Path('results')\ncases = [('strict', 0, 'READ'), ('strict', 4096, 'BLOCKED'),\n         ('strict',\
-        \ 8192, 'BLOCKED'), ('weak', 0, 'READ'),\n         ('weak', 4096, 'FAULT'), ('weak', 8192, 'FLAG')]\nresults = []\n\
-        for mode, offset, expected in cases:\n    name = f'{mode}_{offset}'\n    print('=' * 80, flush=True)\n    print(f'CASE={name}\
-        \ EXPECTED={expected}', flush=True)\n    script = f'''set pagination off\nset confirm off\nset disable-randomization\
-        \ off\nbreak monitored_read\ncommands\n  silent\n  printf \"GDB_DEREFERENCE_ENTERED=1\\\\n\"\n  printf \"GDB_POINTER=%p\\\
-        \\n\", p\n  continue\nend\nrun {mode} {offset}\ninfo program\n'''\n    path = out / f'{name}.gdb'\n    path.write_text(script)\n\
-        \    proc = subprocess.run(['gdb', '-q', '-batch', '-x', str(path), './guard_control'],\n                        \
-        \  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,\n                          text=True, timeout=45, check=False)\n\
-        \    text = proc.stdout\n    (out / f'{name}.log').write_text(text)\n    print(text, flush=True)\n    def addr(label):\n\
-        \        m = re.search(rf'^{label}=(0x[0-9a-fA-F]+)$', text, re.M)\n        return int(m.group(1), 16) if m else None\n\
-        \    ptr, base, end, guard_end = map(addr, ('GDB_POINTER', 'OBJECT_BASE',\n                                      \
-        \      'OBJECT_END', 'GUARD_END'))\n    entered = 'GDB_DEREFERENCE_ENTERED=1' in text\n    completed = 'RESULT=READ_OK'\
-        \ in text\n    blocked = 'RESULT=BLOCKED' in text\n    fault = 'Program received signal SIGSEGV' in text\n    outside\
-        \ = all(x is not None for x in (ptr, base, end)) and not base <= ptr < end\n    beyond = ptr is not None and guard_end\
-        \ is not None and ptr >= guard_end\n    if blocked and not entered and not completed:\n        actual = 'BLOCKED'\n\
-        \    elif entered and fault and not completed:\n        actual = 'FAULT'\n    elif entered and completed:\n      \
-        \  actual = 'FLAG' if outside and beyond else 'READ'\n    else:\n        actual = 'UNKNOWN'\n    result = dict(case=name,\
-        \ expected=expected, actual=actual,\n                  passed=actual == expected, entered=entered,\n             \
-        \     completed=completed, fault=fault, outside=outside,\n                  beyond=beyond, gdb_exit=proc.returncode)\n\
+      run: "set -euo pipefail\ncat > monitor.py <<'PY'\nimport json\nimport pathlib\nimport re\nimport subprocess\n\
+        import sys\n\nout = pathlib.Path('results')\ncases = [('strict', 0, 'READ'), ('strict', 4096, 'BLOCKED'),\n\
+        \         ('strict', 8192, 'BLOCKED'), ('weak', 0, 'READ'),\n         ('weak', 4096, 'FAULT'), ('weak',\
+        \ 8192, 'FLAG')]\nresults = []\nfor mode, offset, expected in cases:\n    name = f'{mode}_{offset}'\n  \
+        \  print('=' * 80, flush=True)\n    print(f'CASE={name} EXPECTED={expected}', flush=True)\n    script =\
+        \ f'''set pagination off\nset confirm off\nset disable-randomization off\nbreak monitored_read\ncommands\n\
+        \  silent\n  printf \"GDB_DEREFERENCE_ENTERED=1\\\\n\"\n  printf \"GDB_POINTER=%p\\\\n\", p\n  continue\n\
+        end\nrun {mode} {offset}\ninfo program\n'''\n    path = out / f'{name}.gdb'\n    path.write_text(script)\n\
+        \    proc = subprocess.run(['gdb', '-q', '-batch', '-x', str(path), './guard_control'],\n              \
+        \            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,\n                          text=True, timeout=45,\
+        \ check=False)\n    text = proc.stdout\n    (out / f'{name}.log').write_text(text)\n    print(text, flush=True)\n\
+        \    def addr(label):\n        m = re.search(rf'^{label}=(0x[0-9a-fA-F]+)$', text, re.M)\n        return\
+        \ int(m.group(1), 16) if m else None\n    ptr, base, end, guard_end = map(addr, ('GDB_POINTER', 'OBJECT_BASE',\n\
+        \                                            'OBJECT_END', 'GUARD_END'))\n    entered = 'GDB_DEREFERENCE_ENTERED=1'\
+        \ in text\n    completed = 'RESULT=READ_OK' in text\n    blocked = 'RESULT=BLOCKED' in text\n    fault =\
+        \ 'Program received signal SIGSEGV' in text\n    outside = all(x is not None for x in (ptr, base, end))\
+        \ and not base <= ptr < end\n    beyond = ptr is not None and guard_end is not None and ptr >= guard_end\n\
+        \    if blocked and not entered and not completed:\n        actual = 'BLOCKED'\n    elif entered and fault\
+        \ and not completed:\n        actual = 'FAULT'\n    elif entered and completed:\n        actual = 'FLAG'\
+        \ if outside and beyond else 'READ'\n    else:\n        actual = 'UNKNOWN'\n    result = dict(case=name,\
+        \ expected=expected, actual=actual,\n                  passed=actual == expected, entered=entered,\n   \
+        \               completed=completed, fault=fault, outside=outside,\n                  beyond=beyond, gdb_exit=proc.returncode)\n\
         \    results.append(result)\n    print('CASE_RESULT=' + json.dumps(result), flush=True)\nsummary = dict(experiment='UNPROTECTED_CONTROL_NOT_QUICKSAFE',\n\
-        \               passed=sum(r['passed'] for r in results),\n               failed=sum(not r['passed'] for r in results),\
-        \ results=results)\n(out / 'guard-summary.json').write_text(json.dumps(summary, indent=2))\nprint('FINAL_CONTROL_SUMMARY='\
-        \ + json.dumps(summary, indent=2))\nsys.exit(1 if summary['failed'] else 0)\nPY\npython3 monitor.py 2>&1 | tee results/control-console.log\n"
+        \               passed=sum(r['passed'] for r in results),\n               failed=sum(not r['passed'] for\
+        \ r in results), results=results)\n(out / 'guard-summary.json').write_text(json.dumps(summary, indent=2))\n\
+        print('FINAL_CONTROL_SUMMARY=' + json.dumps(summary, indent=2))\nsys.exit(1 if summary['failed'] else 0)\n\
+        PY\npython3 monitor.py 2>&1 | tee results/control-console.log\n"
     - name: 07b - Select real LibCalls source location for QuickSafe pass
       shell: bash
-      run: "set -euo pipefail\ncd QuickSafe/quicksafe\nmkdir -p ../../results\necho '=== Target format evidence from official\
-        \ repository ===' | tee ../../results/target-config-discovery.log\ngrep -RIn -C 3 'VP_TARGETS_STR' src targets instances\
-        \ packages 2>/dev/null \\\n  | tee -a ../../results/target-config-discovery.log || true\necho '=== LibCalls source\
-        \ candidates ===' | tee -a ../../results/target-config-discovery.log\nfind tests/libcalls -maxdepth 4 -type f | sort\
-        \ | tee -a ../../results/target-config-discovery.log\n# The upstream target fetches/generated source into build/targets/LibCalls/src\n\
-        # during the build. Pick an existing source line from the checked-in fixture\n# where available, otherwise record\
-        \ a provisional selector and audit it.\npython3 - <<'PYSELECT'\nimport json, pathlib, re\nroot=pathlib.Path('.')\n\
-        candidates=list((root/'tests/libcalls').rglob('*.cpp')) + list((root/'tests/libcalls').rglob('*.c'))\ncandidates +=\
-        \ list((root/'build/targets/LibCalls/src').glob('*.cpp'))\ncandidates += list((root/'build/targets/LibCalls/src').glob('*.c'))\n\
-        chosen=None\nfor f in candidates:\n    lines=f.read_text(errors='replace').splitlines()\n    for n,line in enumerate(lines,1):\n\
-        \        if re.search(r'\\b(?:memcpy|memmove|strcpy|strncpy|malloc|calloc|free|strlen|strcmp|strdup)\\s*\\(',line)\
-        \ and not line.lstrip().startswith('//'):\n            chosen=(f,n,line.strip()); break\n    if chosen: break\nif\
-        \ chosen is None:\n    # This is only a provisional selector: the post-build audit must\n    # verify that target\
-        \ discovery and actual transformation occurred.\n    chosen=(pathlib.Path('libcalls.cpp'),1,'PROVISIONAL: source generated\
-        \ by target fetch')\nf,n,line=chosen\nselector=f'{f.name};;{n}'\npathlib.Path('../../results/target-selector.json').write_text(json.dumps({'selector':selector,'source':str(f),'line':n,'text':line,'provisional':line.startswith('PROVISIONAL')},indent=2))\n\
-        with open(__import__('os').environ['GITHUB_ENV'],'a') as env:\n    env.write('VP_TARGETS_STR='+selector+'\\n')\nprint('VP_TARGETS_STR='+selector)\n\
-        print('SELECTED_SOURCE='+str(f)+':'+str(n)+':'+line)\nPYSELECT\n"
+      run: "set -euo pipefail\ncd QuickSafe/quicksafe\nmkdir -p ../../results\necho '=== Target format evidence\
+        \ from official repository ===' | tee ../../results/target-config-discovery.log\ngrep -RIn -C 3 'VP_TARGETS_STR'\
+        \ src targets instances packages 2>/dev/null \\\n  | tee -a ../../results/target-config-discovery.log ||\
+        \ true\necho '=== LibCalls source candidates ===' | tee -a ../../results/target-config-discovery.log\nfind\
+        \ tests/libcalls -maxdepth 4 -type f | sort | tee -a ../../results/target-config-discovery.log\n# The upstream\
+        \ target fetches/generated source into build/targets/LibCalls/src\n# during the build. Pick an existing\
+        \ source line from the checked-in fixture\n# where available, otherwise record a provisional selector and\
+        \ audit it.\npython3 - <<'PYSELECT'\nimport json, pathlib, re\nroot=pathlib.Path('.')\ncandidates=list((root/'tests/libcalls').rglob('*.cpp'))\
+        \ + list((root/'tests/libcalls').rglob('*.c'))\ncandidates += list((root/'build/targets/LibCalls/src').glob('*.cpp'))\n\
+        candidates += list((root/'build/targets/LibCalls/src').glob('*.c'))\nchosen=None\nfor f in candidates:\n\
+        \    lines=f.read_text(errors='replace').splitlines()\n    for n,line in enumerate(lines,1):\n        if\
+        \ re.search(r'\\b(?:memcpy|memmove|strcpy|strncpy|malloc|calloc|free|strlen|strcmp|strdup)\\s*\\(',line)\
+        \ and not line.lstrip().startswith('//'):\n            chosen=(f,n,line.strip()); break\n    if chosen:\
+        \ break\nif chosen is None:\n    # This is only a provisional selector: the post-build audit must\n    #\
+        \ verify that target discovery and actual transformation occurred.\n    chosen=(pathlib.Path('libcalls.cpp'),1,'PROVISIONAL:\
+        \ source generated by target fetch')\nf,n,line=chosen\nselector=f'{f.name};;{n}'\npathlib.Path('../../results/target-selector.json').write_text(json.dumps({'selector':selector,'source':str(f),'line':n,'text':line,'provisional':line.startswith('PROVISIONAL')},indent=2))\n\
+        with open(__import__('os').environ['GITHUB_ENV'],'a') as env:\n    env.write('VP_TARGETS_STR='+selector+'\\\
+        n')\nprint('VP_TARGETS_STR='+selector)\nprint('SELECTED_SOURCE='+str(f)+':'+str(n)+':'+line)\nPYSELECT\n"
     - name: 08 - Build QuickSafe and capture underlying CMake failure
       id: quicksafe_build
       shell: bash
-      run: "set -euo pipefail\ncd QuickSafe/quicksafe\necho 'BUILD_COMMAND=python3 setup.py build LibCalls QuickSafe' | tee\
-        \ ../../results/build-command.log\nset +e\ntimeout 5400 python3 setup.py build LibCalls QuickSafe \\\n  2>&1 | tee\
-        \ ../../results/quicksafe-build.log\nrc=${PIPESTATUS[0]}\nset -e\necho \"$rc\" > ../../results/quicksafe-build.exit\n\
-        echo '=== Build executable and PATH diagnostics ==='\n{\n  printf 'PATH=%s\\n' \"$PATH\"\n  for exe in ccache cmake\
-        \ ninja make clang clang++ clang-16 clang++-16 llvm-config llvm-config-16 ld.lld ld.lld-16; do\n    command -v \"\
-        $exe\" || true\n  done\n  ls -l /usr/lib/llvm-16/bin/ld /usr/lib/llvm-16/bin/ld.lld || true\n} > ../../results/quicksafe-build-tools.log\
-        \ 2>&1\ncat ../../results/quicksafe-build-tools.log\necho '=== CMake diagnostics for QuickSafePass ===' \npass_build='build/packages/QuickSafePass/build'\n\
-        if [ -d \"$pass_build\" ]; then\n  find \"$pass_build\" -maxdepth 4 -type f \\\n    \\( -name 'CMakeCache.txt' -o\
-        \ -name 'CMakeError.log' -o -name 'CMakeConfigureLog.yaml' -o -name 'build.ninja' -o -name 'flags.make' -o -name 'link.txt'\
-        \ \\) \\\n    -print | tee ../../results/quicksafe-cmake-files.log\n  if [ -f \"$pass_build/CMakeCache.txt\" ]; then\n\
-        \    grep -E '^(CMAKE_(C|CXX)_COMPILER|CMAKE_MAKE_PROGRAM|LLVM_DIR|CMAKE_BUILD_TYPE):' \\\n      \"$pass_build/CMakeCache.txt\"\
-        \ | tee ../../results/quicksafe-cmake-config.log || true\n  fi\n  # A second direct invocation exposes the command\
-        \ hidden by infra's\n  # abbreviated exception. It runs only if the first build failed.\n  if grep -Eq '\\[FTL\\]|\\\
-        [ERR\\]|\\[FAIL\\]|Command execution failed|Command failed|Traceback|Status:[[:space:]]*[1-9]' ../../results/quicksafe-build.log\
-        \ || [ \"$rc\" -ne 0 ]; then\n    echo '=== Reproduce QuickSafePass failure with full CMake output ==='\n    set +e\n\
-        \    timeout 300 cmake --build \"$pass_build\" --parallel 1 --verbose \\\n      > ../../results/quicksafe-cmake-reproduction.log\
-        \ 2>&1\n    cmake_rc=$?\n    set -e\n    echo \"$cmake_rc\" > ../../results/quicksafe-cmake-reproduction.exit\n  \
-        \  cat ../../results/quicksafe-cmake-reproduction.log\n    echo '=== Inspect generated CMake build commands ==='\n\
-        \    if [ -f \"$pass_build/build.ninja\" ]; then\n      ninja -C \"$pass_build\" -t commands > ../../results/quicksafe-generated-commands.log\
-        \ 2>&1 || true\n      ninja -C \"$pass_build\" -n -v > ../../results/quicksafe-build-dry-run.log 2>&1 || true\n  \
-        \  elif [ -f \"$pass_build/Makefile\" ]; then\n      make -C \"$pass_build\" -n VERBOSE=1 > ../../results/quicksafe-build-dry-run.log\
-        \ 2>&1 || true\n    fi\n    if [ -f ../../results/quicksafe-generated-commands.log ]; then\n      sed -n '1,100p'\
-        \ ../../results/quicksafe-generated-commands.log\n    fi\n    echo '=== Reproduction log tail ==='\n    tail -n 100\
-        \ ../../results/quicksafe-cmake-reproduction.log\n  fi\nfi\npython3 - <<'PYBUILD'\nimport json, pathlib, re\nroot\
-        \ = pathlib.Path('../../results')\nlog = (root / 'quicksafe-build.log').read_text(errors='replace')\nrc = int((root\
-        \ / 'quicksafe-build.exit').read_text())\npatterns = {\n    'infra_fatal': r'\\[(?:FTL|ERR|FAIL)\\]',\n    'command_failure':\
-        \ r'(?i)Command (?:execution )?failed|Status:\\s*[1-9][0-9]*',\n    'python_traceback': r'Traceback \\(most recent\
-        \ call last\\):|\\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\\b',\n    'build_system_failure':\
-        \ r'(?i)CMake Error|ninja: (?:error|build stopped)|make(?:\\[[0-9]+\\])?: \\*\\*\\*|FAILED:',\n}\nmatched = [name\
-        \ for name, pat in patterns.items() if re.search(pat, log)]\ninstall = pathlib.Path('build/packages/QuickSafePass/install')\n\
-        pass_artifacts = sorted(str(p) for p in install.rglob('*') if p.is_file() and\n                        (p.suffix in\
-        \ {'.so', '.a', '.bc'} or '.so.' in p.name)) if install.exists() else []\n# libbacktrace alone must never qualify\
-        \ as a QuickSafe build.\nhealthy = rc == 0 and not matched and bool(pass_artifacts)\nresult = {'process_exit': rc,\
-        \ 'fatal_patterns': matched,\n          'quicksafe_pass_install_exists': install.is_dir(),\n          'quicksafe_pass_artifacts':\
-        \ pass_artifacts,\n          'build_healthy': healthy,\n          'cmake_reproduction_exit': int((root / 'quicksafe-cmake-reproduction.exit').read_text())\
+      run: "set -euo pipefail\ncd QuickSafe/quicksafe\necho 'BUILD_COMMAND=python3 setup.py build LibCalls QuickSafe'\
+        \ | tee ../../results/build-command.log\nset +e\ntimeout 5400 python3 setup.py build LibCalls QuickSafe\
+        \ \\\n  2>&1 | tee ../../results/quicksafe-build.log\nrc=${PIPESTATUS[0]}\nset -e\necho \"$rc\" > ../../results/quicksafe-build.exit\n\
+        echo '=== Build executable and PATH diagnostics ==='\n{\n  printf 'PATH=%s\\n' \"$PATH\"\n  for exe in ccache\
+        \ cmake ninja make clang clang++ clang-16 clang++-16 llvm-config llvm-config-16 ld.lld ld.lld-16; do\n \
+        \   command -v \"$exe\" || true\n  done\n  ls -l /usr/lib/llvm-16/bin/ld /usr/lib/llvm-16/bin/ld.lld ||\
+        \ true\n} > ../../results/quicksafe-build-tools.log 2>&1\ncat ../../results/quicksafe-build-tools.log\n\
+        echo '=== CMake diagnostics for QuickSafePass ===' \npass_build='build/packages/QuickSafePass/build'\nif\
+        \ [ -d \"$pass_build\" ]; then\n  find \"$pass_build\" -maxdepth 4 -type f \\\n    \\( -name 'CMakeCache.txt'\
+        \ -o -name 'CMakeError.log' -o -name 'CMakeConfigureLog.yaml' -o -name 'build.ninja' -o -name 'flags.make'\
+        \ -o -name 'link.txt' \\) \\\n    -print | tee ../../results/quicksafe-cmake-files.log\n  if [ -f \"$pass_build/CMakeCache.txt\"\
+        \ ]; then\n    grep -E '^(CMAKE_(C|CXX)_COMPILER|CMAKE_MAKE_PROGRAM|LLVM_DIR|CMAKE_BUILD_TYPE):' \\\n  \
+        \    \"$pass_build/CMakeCache.txt\" | tee ../../results/quicksafe-cmake-config.log || true\n  fi\n  # A\
+        \ second direct invocation exposes the command hidden by infra's\n  # abbreviated exception. It runs only\
+        \ if the first build failed.\n  if grep -Eq '\\[FTL\\]|\\[ERR\\]|\\[FAIL\\]|Command execution failed|Command\
+        \ failed|Traceback|Status:[[:space:]]*[1-9]' ../../results/quicksafe-build.log || [ \"$rc\" -ne 0 ]; then\n\
+        \    echo '=== Reproduce QuickSafePass failure with full CMake output ==='\n    set +e\n    timeout 300\
+        \ cmake --build \"$pass_build\" --parallel 1 --verbose \\\n      > ../../results/quicksafe-cmake-reproduction.log\
+        \ 2>&1\n    cmake_rc=$?\n    set -e\n    echo \"$cmake_rc\" > ../../results/quicksafe-cmake-reproduction.exit\n\
+        \    cat ../../results/quicksafe-cmake-reproduction.log\n    echo '=== Inspect generated CMake build commands\
+        \ ==='\n    if [ -f \"$pass_build/build.ninja\" ]; then\n      ninja -C \"$pass_build\" -t commands > ../../results/quicksafe-generated-commands.log\
+        \ 2>&1 || true\n      ninja -C \"$pass_build\" -n -v > ../../results/quicksafe-build-dry-run.log 2>&1 ||\
+        \ true\n    elif [ -f \"$pass_build/Makefile\" ]; then\n      make -C \"$pass_build\" -n VERBOSE=1 > ../../results/quicksafe-build-dry-run.log\
+        \ 2>&1 || true\n    fi\n    if [ -f ../../results/quicksafe-generated-commands.log ]; then\n      sed -n\
+        \ '1,100p' ../../results/quicksafe-generated-commands.log\n    fi\n    echo '=== Reproduction log tail ==='\n\
+        \    tail -n 100 ../../results/quicksafe-cmake-reproduction.log\n  fi\nfi\npython3 - <<'PYBUILD'\nimport\
+        \ json, pathlib, re\nroot = pathlib.Path('../../results')\nlog = (root / 'quicksafe-build.log').read_text(errors='replace')\n\
+        rc = int((root / 'quicksafe-build.exit').read_text())\npatterns = {\n    'infra_fatal': r'\\[(?:FTL|ERR|FAIL)\\\
+        ]',\n    'command_failure': r'(?i)Command (?:execution )?failed|Status:\\s*[1-9][0-9]*',\n    'python_traceback':\
+        \ r'Traceback \\(most recent call last\\):|\\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\\\
+        b',\n    'build_system_failure': r'(?i)CMake Error|ninja: (?:error|build stopped)|make(?:\\[[0-9]+\\])?:\
+        \ \\*\\*\\*|FAILED:',\n}\nmatched = [name for name, pat in patterns.items() if re.search(pat, log)]\ninstall\
+        \ = pathlib.Path('build/packages/QuickSafePass/install')\npass_artifacts = sorted(str(p) for p in install.rglob('*')\
+        \ if p.is_file() and\n                        (p.suffix in {'.so', '.a', '.bc'} or '.so.' in p.name)) if\
+        \ install.exists() else []\n# libbacktrace alone must never qualify as a QuickSafe build.\nhealthy = rc\
+        \ == 0 and not matched and bool(pass_artifacts)\nresult = {'process_exit': rc, 'fatal_patterns': matched,\n\
+        \          'quicksafe_pass_install_exists': install.is_dir(),\n          'quicksafe_pass_artifacts': pass_artifacts,\n\
+        \          'build_healthy': healthy,\n          'cmake_reproduction_exit': int((root / 'quicksafe-cmake-reproduction.exit').read_text())\
         \ if (root / 'quicksafe-cmake-reproduction.exit').exists() else None}\n(root / 'quicksafe-build-health.json').write_text(json.dumps(result,\
-        \ indent=2))\nprint('QUICKSAFE_BUILD_HEALTH=' + json.dumps(result), flush=True)\nif not healthy:\n    raise SystemExit('QuickSafe\
-        \ build NOT verified; inspect quicksafe-cmake-reproduction.log')\nPYBUILD\necho 'QUICKSAFE_BUILD_VERIFIED=PASS'\n"
+        \ indent=2))\nprint('QUICKSAFE_BUILD_HEALTH=' + json.dumps(result), flush=True)\nif not healthy:\n    raise\
+        \ SystemExit('QuickSafe build NOT verified; inspect quicksafe-cmake-reproduction.log')\nPYBUILD\necho 'QUICKSAFE_BUILD_VERIFIED=PASS'\n"
     - name: 08b - Rebuild real compiled allocation with verified selector (fail closed)
       if: steps.quicksafe_build.outcome == 'success'
       shell: bash
       run: "set -euo pipefail\ncd QuickSafe/quicksafe\npython3 - <<'PYSELECT'\nimport json, pathlib, re\nsrc=pathlib.Path('build/targets/LibCalls/src/libcalls.cpp')\n\
-        if not src.exists(): raise SystemExit('Compiled C++ source missing: '+str(src))\noriginal=src.read_text()\nif 'QS_V17_PROBE_BEGIN'\
-        \ not in original:\n    marker='int __attribute__((optnone)) main(int argc, char **argv)'\n    if marker not in original:\
-        \ raise SystemExit('Cannot find main to insert probe')\n    fixture = r'''// QS_V17_PROBE_BEGIN\n#include <unistd.h>\n\
-        #include <cstdint>\n#include <cerrno>\n#include <fstream>\n#include <string>\n#include <iostream>\n#include <limits>\n\
-        __attribute__((noinline,optnone)) static int qs_v17_probe() {\n    char *p = new char[64]; // QS_V17_TARGET_ALLOCATION\n\
-        \    p[0] = 0x35;\n    const long pg = sysconf(_SC_PAGESIZE);\n    const char *raw = getenv(\"QS_V17_OFFSET\");\n\
-        \    if (pg <= 0 || !raw) return 71;\n    errno=0; char *end=nullptr;\n    unsigned long long offset=strtoull(raw,&end,10);\n\
-        \    if (errno || !end || *end || offset > 64ULL*1024ULL*1024ULL) return 73;\n    const uintptr_t base=reinterpret_cast<uintptr_t>(p);\n\
+        if not src.exists(): raise SystemExit('Compiled C++ source missing: '+str(src))\noriginal=src.read_text()\n\
+        if 'QS_V17_PROBE_BEGIN' not in original:\n    marker='int __attribute__((optnone)) main(int argc, char **argv)'\n\
+        \    if marker not in original: raise SystemExit('Cannot find main to insert probe')\n    fixture = r'''//\
+        \ QS_V17_PROBE_BEGIN\n#include <unistd.h>\n#include <cstdint>\n#include <cerrno>\n#include <fstream>\n#include\
+        \ <string>\n#include <iostream>\n#include <limits>\n__attribute__((noinline,optnone)) static int qs_v17_probe()\
+        \ {\n    char *p = new char[64]; // QS_V17_TARGET_ALLOCATION\n    p[0] = 0x35;\n    const long pg = sysconf(_SC_PAGESIZE);\n\
+        \    const char *raw = getenv(\"QS_V17_OFFSET\");\n    if (pg <= 0 || !raw) return 71;\n    errno=0; char\
+        \ *end=nullptr;\n    unsigned long long offset=strtoull(raw,&end,10);\n    if (errno || !end || *end ||\
+        \ offset > 64ULL*1024ULL*1024ULL) return 73;\n    const uintptr_t base=reinterpret_cast<uintptr_t>(p);\n\
         \    if (offset > std::numeric_limits<uintptr_t>::max()-base) return 74;\n    const uintptr_t addr=base+static_cast<uintptr_t>(offset);\n\
-        \    std::cout << \"QS_PROBE_BEGIN=1\\nQS_BASE=0x\" << std::hex << base\n              << \"\\nQS_ADDR=0x\" << addr\
-        \ << std::dec\n              << \"\\nQS_PAGE_SIZE=\" << pg << \"\\nQS_OFFSET=\" << offset << \"\\n\";\n    std::ifstream\
-        \ maps(\"/proc/self/maps\"); std::string line;\n    while (std::getline(maps,line)) {\n        unsigned long long\
-        \ lo=0,hi=0; char perms[8]={0};\n        if (sscanf(line.c_str(),\"%llx-%llx %7s\",&lo,&hi,perms)==3) {\n        \
-        \    const bool at_base=base>=lo && base<hi;\n            const bool at_target=addr>=lo && addr<hi;\n            const\
-        \ uintptr_t after=base+static_cast<uintptr_t>(pg);\n            const bool at_next=after>=lo && after<hi;\n      \
-        \      std::cout << \"QS_MAP=\" << line << \"\\n\";\n            if (at_target) std::cout << \"QS_TARGET_MAPPING_PERMS=\"\
-        \ << perms << \"\\n\";\n            if (at_next) std::cout << \"QS_PAGE_PLUS_ONE_PERMS=\" << perms << \"\\n\";\n \
-        \       }\n    }\n    if (getenv(\"QS_V23_WRITE_OFFSET\")) {\n        std::cout << \"QS_WRITE_BEGIN=1\\n\" << std::flush;\n\
-        \        *reinterpret_cast<volatile unsigned char *>(addr) = 0xA7;\n        std::cout << \"QS_WRITE_OK=1\\n\" << std::flush;\n\
-        \        volatile unsigned char verify=*reinterpret_cast<volatile unsigned char *>(addr);\n        std::cout << \"\
-        QS_WRITE_READBACK=\" << static_cast<unsigned>(verify) << \"\\n\" << std::flush;\n        _Exit(verify == 0xA7 ? 0\
-        \ : 81);\n    }\n    std::cout << \"QS_READ_BEGIN=1\\n\" << std::flush;\n    volatile unsigned char value=*reinterpret_cast<volatile\
-        \ unsigned char *>(addr);\n    std::cout << \"QS_READ_OK=1\\nQS_VALUE=\" << static_cast<unsigned>(value) << \"\\n\"\
-        \ << std::flush;\n    _Exit(0);\n}\n// QS_V17_PROBE_END\n'''\n    updated=original.replace(marker,fixture+'\\n'+marker,1)\n\
-        \    entry='int __attribute__((optnone)) main(int argc, char **argv)\\n{'\n    if entry not in updated: raise SystemExit('Cannot\
-        \ find main entry')\n    updated=updated.replace(entry,entry+'\\n    if (getenv(\"QS_V17_OFFSET\")) return qs_v17_probe();',1)\n\
+        \    std::cout << \"QS_PROBE_BEGIN=1\\nQS_BASE=0x\" << std::hex << base\n              << \"\\nQS_ADDR=0x\"\
+        \ << addr << std::dec\n              << \"\\nQS_PAGE_SIZE=\" << pg << \"\\nQS_OFFSET=\" << offset << \"\\\
+        n\";\n    std::ifstream maps(\"/proc/self/maps\"); std::string line;\n    while (std::getline(maps,line))\
+        \ {\n        unsigned long long lo=0,hi=0; char perms[8]={0};\n        if (sscanf(line.c_str(),\"%llx-%llx\
+        \ %7s\",&lo,&hi,perms)==3) {\n            const bool at_base=base>=lo && base<hi;\n            const bool\
+        \ at_target=addr>=lo && addr<hi;\n            const uintptr_t after=base+static_cast<uintptr_t>(pg);\n \
+        \           const bool at_next=after>=lo && after<hi;\n            std::cout << \"QS_MAP=\" << line << \"\
+        \\n\";\n            if (at_target) std::cout << \"QS_TARGET_MAPPING_PERMS=\" << perms << \"\\n\";\n    \
+        \        if (at_next) std::cout << \"QS_PAGE_PLUS_ONE_PERMS=\" << perms << \"\\n\";\n        }\n    }\n\
+        \    if (getenv(\"QS_V23_WRITE_OFFSET\")) {\n        std::cout << \"QS_WRITE_BEGIN=1\\n\" << std::flush;\n\
+        \        *reinterpret_cast<volatile unsigned char *>(addr) = 0xA7;\n        std::cout << \"QS_WRITE_OK=1\\\
+        n\" << std::flush;\n        volatile unsigned char verify=*reinterpret_cast<volatile unsigned char *>(addr);\n\
+        \        std::cout << \"QS_WRITE_READBACK=\" << static_cast<unsigned>(verify) << \"\\n\" << std::flush;\n\
+        \        _Exit(verify == 0xA7 ? 0 : 81);\n    }\n    std::cout << \"QS_READ_BEGIN=1\\n\" << std::flush;\n\
+        \    volatile unsigned char value=*reinterpret_cast<volatile unsigned char *>(addr);\n    std::cout << \"\
+        QS_READ_OK=1\\nQS_VALUE=\" << static_cast<unsigned>(value) << \"\\n\" << std::flush;\n    _Exit(0);\n}\n\
+        // QS_V17_PROBE_END\n'''\n    updated=original.replace(marker,fixture+'\\n'+marker,1)\n    entry='int __attribute__((optnone))\
+        \ main(int argc, char **argv)\\n{'\n    if entry not in updated: raise SystemExit('Cannot find main entry')\n\
+        \    updated=updated.replace(entry,entry+'\\n    if (getenv(\"QS_V17_OFFSET\")) return qs_v17_probe();',1)\n\
         \    src.write_text(updated)\n    pathlib.Path('../../results/libcalls-original-source.cpp').write_text(original)\n\
         lines=src.read_text().splitlines()\nallocs=[(i,x.strip()) for i,x in enumerate(lines,1) if 'QS_V17_TARGET_ALLOCATION'\
         \ in x]\nif not allocs: raise SystemExit('No allocation definition in compiled source')\nline,statement=allocs[0]\n\
         pathlib.Path('../../results/real-allocation.json').write_text(json.dumps({'compiled_source':str(src.resolve()),'line':line,'statement':statement,'source_sha256':__import__('hashlib').sha256(src.read_bytes()).hexdigest()},indent=2))\n\
-        print('ACTUAL_COMPILED_ALLOCATION='+str(src)+':'+str(line)+':'+statement)\nPYSELECT\necho '=== Actual pass parser\
-        \ implementation ===' | tee ../../results/selector-parser-source.txt\ngrep -RInE 'Parsing target string|Parsed targeted\
-        \ source locations|VP_TARGETS_STR|parseTargetStr' src packages 2>/dev/null \\\n  | head -n 140 | tee -a ../../results/selector-parser-source.txt\
-        \ || true\npython3 - <<'PYGEN'\nimport json,pathlib\nd=json.loads(pathlib.Path('../../results/real-allocation.json').read_text())\n\
-        line=d['line']; name=pathlib.Path(d['compiled_source']).name\nvariants=[f'{name};;{line}',f'{name};qs_v17_probe;{line}',f'{name};main;{line}',f'main;{name};{line}',f';{name};{line}',f'{name}:{line}',f'{name};{line}',f'{d[\"\
+        print('ACTUAL_COMPILED_ALLOCATION='+str(src)+':'+str(line)+':'+statement)\nPYSELECT\necho '=== Actual pass\
+        \ parser implementation ===' | tee ../../results/selector-parser-source.txt\ngrep -RInE 'Parsing target\
+        \ string|Parsed targeted source locations|VP_TARGETS_STR|parseTargetStr' src packages 2>/dev/null \\\n \
+        \ | head -n 140 | tee -a ../../results/selector-parser-source.txt || true\npython3 - <<'PYGEN'\nimport json,pathlib\n\
+        d=json.loads(pathlib.Path('../../results/real-allocation.json').read_text())\nline=d['line']; name=pathlib.Path(d['compiled_source']).name\n\
+        variants=[f'{name};;{line}',f'{name};qs_v17_probe;{line}',f'{name};main;{line}',f'main;{name};{line}',f';{name};{line}',f'{name}:{line}',f'{name};{line}',f'{d[\"\
         compiled_source\"]};main;{line}',f'{d[\"compiled_source\"]};;{line}']\npathlib.Path('../../results/selector-candidates.json').write_text(json.dumps(variants,indent=2))\n\
         PYGEN\npython3 - <<'PYREBUILD'\nimport json,os,pathlib,re,subprocess,sys\nroot=pathlib.Path('.'); out=pathlib.Path('../../results')\n\
-        candidates=json.loads((out/'selector-candidates.json').read_text())\ntarget=root/'build/targets/LibCalls'\nbuilds=list(target.rglob('build.ninja'))\n\
-        if not builds: raise SystemExit('Cannot force rebuild: no target build.ninja found')\nreport=[]; success=None\nfor\
-        \ index,selector in enumerate(candidates,1):\n    env=os.environ.copy(); env['VP_TARGETS_STR']=selector\n    print(f'===\
-        \ SELECTOR ATTEMPT {index}/{len(candidates)}: {selector!r} ===',flush=True)\n    for buildfile in builds:\n      \
-        \  proc=subprocess.run(['ninja','-C',str(buildfile.parent),'-t','clean'],capture_output=True,text=True,timeout=90)\n\
+        candidates=json.loads((out/'selector-candidates.json').read_text())\ntarget=root/'build/targets/LibCalls'\n\
+        builds=list(target.rglob('build.ninja'))\nif not builds: raise SystemExit('Cannot force rebuild: no target\
+        \ build.ninja found')\nreport=[]; success=None\nfor index,selector in enumerate(candidates,1):\n    env=os.environ.copy();\
+        \ env['VP_TARGETS_STR']=selector\n    print(f'=== SELECTOR ATTEMPT {index}/{len(candidates)}: {selector!r}\
+        \ ===',flush=True)\n    for buildfile in builds:\n        proc=subprocess.run(['ninja','-C',str(buildfile.parent),'-t','clean'],capture_output=True,text=True,timeout=90)\n\
         \        if proc.returncode: raise SystemExit(f'Cannot clean {buildfile.parent}: {proc.stderr}')\n    proc=subprocess.run(['timeout','480','python3','setup.py','build','LibCalls','QuickSafe'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=500)\n\
-        \    logfile=out/f'selector-attempt-{index:02d}.log'; logfile.write_text(proc.stdout)\n    counts={k:[int(x) for x\
-        \ in re.findall(p,proc.stdout,re.I)] for k,p in {\n      'targets':r'Found\\s+(\\d+)\\s+target\\(s\\)',\n      'heap':r'Found\\\
-        s+(\\d+)\\s+targeted heap alloc\\(s\\)',\n      'stack':r'Found\\s+(\\d+)\\s+targeted stack alloc\\(s\\)',\n     \
-        \ 'defsites':r'Instrumenting\\s+(\\d+)\\s+targeted defsite\\(s\\)'}.items()}\n    matched=proc.returncode==0 and max(counts['targets']\
-        \ or [0])>0 and max(counts['defsites'] or [0])>0 and (max(counts['heap'] or [0])>0 or max(counts['stack'] or [0])>0)\n\
-        \    item={'selector':selector,'exit':proc.returncode,'counts':counts,'verified':matched,'log':str(logfile)}\n   \
-        \ report.append(item); print('SELECTOR_RESULT='+json.dumps(item),flush=True)\n    if matched:\n        success=item\n\
-        \        (out/'quicksafe-build.log').write_text((out/'quicksafe-build.log').read_text()+'\\n=== VERIFIED REBUILD ===\\\
-        n'+proc.stdout)\n        (out/'verified-target-selector.txt').write_text(selector+'\\n')\n        import hashlib\n\
-        \        binary=root/'build/targets/LibCalls/bin/libcalls'\n        if not binary.is_file():\n            raise SystemExit('Verified\
-        \ selector produced no LibCalls executable')\n        digest=hashlib.sha256(binary.read_bytes()).hexdigest()\n   \
-        \     provenance={'selector':selector,'binary':str(binary.resolve()),\n                    'sha256_after_instrumented_rebuild':digest,\n\
+        \    logfile=out/f'selector-attempt-{index:02d}.log'; logfile.write_text(proc.stdout)\n    counts={k:[int(x)\
+        \ for x in re.findall(p,proc.stdout,re.I)] for k,p in {\n      'targets':r'Found\\s+(\\d+)\\s+target\\(s\\\
+        )',\n      'heap':r'Found\\s+(\\d+)\\s+targeted heap alloc\\(s\\)',\n      'stack':r'Found\\s+(\\d+)\\s+targeted\
+        \ stack alloc\\(s\\)',\n      'defsites':r'Instrumenting\\s+(\\d+)\\s+targeted defsite\\(s\\)'}.items()}\n\
+        \    matched=proc.returncode==0 and max(counts['targets'] or [0])>0 and max(counts['defsites'] or [0])>0\
+        \ and (max(counts['heap'] or [0])>0 or max(counts['stack'] or [0])>0)\n    item={'selector':selector,'exit':proc.returncode,'counts':counts,'verified':matched,'log':str(logfile)}\n\
+        \    report.append(item); print('SELECTOR_RESULT='+json.dumps(item),flush=True)\n    if matched:\n     \
+        \   success=item\n        (out/'quicksafe-build.log').write_text((out/'quicksafe-build.log').read_text()+'\\\
+        n=== VERIFIED REBUILD ===\\n'+proc.stdout)\n        (out/'verified-target-selector.txt').write_text(selector+'\\\
+        n')\n        import hashlib\n        binary=root/'build/targets/LibCalls/bin/libcalls'\n        if not binary.is_file():\n\
+        \            raise SystemExit('Verified selector produced no LibCalls executable')\n        digest=hashlib.sha256(binary.read_bytes()).hexdigest()\n\
+        \        provenance={'selector':selector,'binary':str(binary.resolve()),\n                    'sha256_after_instrumented_rebuild':digest,\n\
         \                    'size_bytes':binary.stat().st_size,\n                    'counts':counts,'selector_log':str(logfile),\n\
         \                    'source':json.loads((out/'real-allocation.json').read_text())}\n        (out/'verified-binary-provenance.json').write_text(json.dumps(provenance,indent=2))\n\
         \        print('VERIFIED_BINARY_PROVENANCE='+json.dumps(provenance),flush=True)\n        with open(os.environ['GITHUB_ENV'],'a')\
         \ as f: f.write('VP_TARGETS_STR='+selector+'\\n')\n        break\n(out/'selector-attempts.json').write_text(json.dumps({'attempts':report,'verified':success},indent=2))\n\
-        if not success: raise SystemExit('FAIL CLOSED: No candidate selected and instrumented a real allocation. Inspect selector-attempt\
-        \ logs and parser source.')\nPYREBUILD\n"
+        if not success: raise SystemExit('FAIL CLOSED: No candidate selected and instrumented a real allocation.\
+        \ Inspect selector-attempt logs and parser source.')\nPYREBUILD\n"
     - name: 09 - Verify QuickSafePass and LibCalls-specific outputs
       if: steps.quicksafe_build.outcome == 'success'
       id: quicksafe_artifacts
       shell: bash
       run: "set -euo pipefail\npython3 - <<'PYART'\nfrom pathlib import Path\nimport json\nroot = Path('QuickSafe/quicksafe/build')\n\
-        installed = root / 'packages/QuickSafePass/install'\npass_files = sorted(str(p) for p in installed.rglob('*') if p.is_file()\
-        \ and\n                    (p.suffix in {'.so', '.a', '.bc'} or '.so.' in p.name)) if installed.exists() else []\n\
-        # Inspect all target outputs; do not confuse libbacktrace with LibCalls.\ntarget_files = sorted(str(p) for p in (root\
-        \ / 'targets').rglob('*') if p.is_file()) if (root / 'targets').exists() else []\nreport = {'pass_files': pass_files,\
-        \ 'target_files': target_files[:500],\n          'pass_verified': bool(pass_files), 'target_files_present': bool(target_files)}\n\
-        Path('results/quicksafe-artifacts.json').write_text(json.dumps(report, indent=2))\nprint('QUICKSAFE_ARTIFACTS=' +\
-        \ json.dumps(report, indent=2))\nif not pass_files or not target_files:\n    raise SystemExit('Missing QuickSafePass\
-        \ installation or built target files')\nPYART\n"
+        installed = root / 'packages/QuickSafePass/install'\npass_files = sorted(str(p) for p in installed.rglob('*')\
+        \ if p.is_file() and\n                    (p.suffix in {'.so', '.a', '.bc'} or '.so.' in p.name)) if installed.exists()\
+        \ else []\n# Inspect all target outputs; do not confuse libbacktrace with LibCalls.\ntarget_files = sorted(str(p)\
+        \ for p in (root / 'targets').rglob('*') if p.is_file()) if (root / 'targets').exists() else []\nreport\
+        \ = {'pass_files': pass_files, 'target_files': target_files[:500],\n          'pass_verified': bool(pass_files),\
+        \ 'target_files_present': bool(target_files)}\nPath('results/quicksafe-artifacts.json').write_text(json.dumps(report,\
+        \ indent=2))\nprint('QUICKSAFE_ARTIFACTS=' + json.dumps(report, indent=2))\nif not pass_files or not target_files:\n\
+        \    raise SystemExit('Missing QuickSafePass installation or built target files')\nPYART\n"
     - name: 10 - Ultra-verbose QuickSafe LibCalls run and evidence-based verification
       id: quicksafe_run
       if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
       shell: bash
-      run: "set -euo pipefail\ncd QuickSafe/quicksafe\ntarget='build/targets/LibCalls/bin/libcalls'\necho '========== QUICKSAFE\
-        \ RUNTIME PRE-FLIGHT =========='\necho \"PWD=$PWD\"\necho \"PATH=$PATH\"\necho \"PYTHON=$(command -v python3)\"\n\
-        echo \"LLVM_CONFIG=$(command -v llvm-config)\"\necho \"TARGET=$target\"\necho '=== Target directory listing ==='\n\
-        ls -lah build/targets/LibCalls/bin/ || true\necho '=== Target file identification ==='\nif [ -f \"$target\" ]; then\n\
-        \  file \"$target\" || true\n  stat \"$target\" || true\n  ls -l \"$target\"\n  ldd \"$target\" || true\nelse\n  echo\
-        \ \"PRE-FLIGHT ERROR: expected LibCalls executable absent: $target\"\nfi\necho '=== QuickSafePass installed files\
-        \ ==='\nfind build/packages/QuickSafePass/install -maxdepth 5 -type f -printf '%p (%s bytes)\\n' | head -n 120 ||\
-        \ true\necho '=== Run command and timestamps ==='\ndate -u '+RUN_START_UTC=%Y-%m-%dT%H:%M:%SZ'\nprintf '%s\\n' 'COMMAND=timeout\
-        \ 600 python3 setup.py -v debug run LibCalls QuickSafe'\nset +e\nPYTHONUNBUFFERED=1 timeout 600 python3 setup.py -v\
-        \ debug run LibCalls QuickSafe \\\n  2>&1 | tee ../../results/quicksafe-run.log\nrc=${PIPESTATUS[0]}\nset -e\nprintf\
-        \ '%s\\n' \"$rc\" > ../../results/quicksafe-run.exit\ndate -u '+RUN_END_UTC=%Y-%m-%dT%H:%M:%SZ'\necho \"QUICKSAFE_RUN_PROCESS_EXIT=$rc\"\
-        \necho '========== RUNTIME LOG FULL NUMBERED REPLAY =========='\nnl -ba ../../results/quicksafe-run.log || true\n\
-        echo '========== RUNTIME DIAGNOSTIC ANALYSIS =========='\npython3 - <<'PYRUN'\nimport json, pathlib, re, os, stat\n\
-        root = pathlib.Path('../../results')\nlog = (root / 'quicksafe-run.log').read_text(errors='replace')\nlines = log.splitlines()\n\
-        rc = int((root / 'quicksafe-run.exit').read_text())\ntarget = pathlib.Path('build/targets/LibCalls/bin/libcalls')\n\
-        patterns = {\n    'infra_fatal': r'\\[(?:FTL|ERR|FAIL)\\]',\n    'python_traceback': r'Traceback \\(most recent call\
-        \ last\\):|\\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\\b',\n    'command_failure': r'(?i)Command\
-        \ (?:execution )?failed|Status:\\s*[1-9][0-9]*',\n    'specific_missing_target': r'(?i)(?:target|binary|executable|libcalls)[^\\\
-        n]{0,120}(?:does not exist!|No such file or directory)',\n    'build_system_failure': r'(?i)CMake Error|ninja: (?:error|build\
-        \ stopped)|make(?:\\[[0-9]+\\])?: \\*\\*\\*',\n}\nevidence = []\nfor name, pattern in patterns.items():\n    for i,\
-        \ line in enumerate(lines):\n        if re.search(pattern, line):\n            evidence.append({'type': name, 'line':\
-        \ i + 1, 'text': line[:1200],\n                             'context_before': lines[max(0,i-2):i],\n             \
-        \                'context_after': lines[i+1:i+4]})\ninformational = []\nfor i, line in enumerate(lines):\n    if re.search(r'(?i)(?:no\
-        \ raw profiling data found|found 0 raw profiling data files|nothing to parse)', line):\n        informational.append({'line':\
-        \ i+1, 'text': line[:1200]})\n# Important: \"No raw profiling data found\" is not a missing target.\n# The executable\
-        \ is independently checked on disk.\ntarget_exists = target.is_file()\ntarget_executable = target_exists and os.access(target,\
-        \ os.X_OK)\nhealthy = rc == 0 and not evidence and target_executable\nresult = {\n    'process_exit': rc,\n    'target_path':\
-        \ str(target),\n    'target_exists': target_exists,\n    'target_executable': target_executable,\n    'fatal_patterns':\
+      run: "set -euo pipefail\ncd QuickSafe/quicksafe\ntarget='build/targets/LibCalls/bin/libcalls'\necho '==========\
+        \ QUICKSAFE RUNTIME PRE-FLIGHT =========='\necho \"PWD=$PWD\"\necho \"PATH=$PATH\"\necho \"PYTHON=$(command\
+        \ -v python3)\"\necho \"LLVM_CONFIG=$(command -v llvm-config)\"\necho \"TARGET=$target\"\necho '=== Target\
+        \ directory listing ==='\nls -lah build/targets/LibCalls/bin/ || true\necho '=== Target file identification\
+        \ ==='\nif [ -f \"$target\" ]; then\n  file \"$target\" || true\n  stat \"$target\" || true\n  ls -l \"\
+        $target\"\n  ldd \"$target\" || true\nelse\n  echo \"PRE-FLIGHT ERROR: expected LibCalls executable absent:\
+        \ $target\"\nfi\necho '=== QuickSafePass installed files ==='\nfind build/packages/QuickSafePass/install\
+        \ -maxdepth 5 -type f -printf '%p (%s bytes)\\n' | head -n 120 || true\necho '=== Run command and timestamps\
+        \ ==='\ndate -u '+RUN_START_UTC=%Y-%m-%dT%H:%M:%SZ'\nprintf '%s\\n' 'COMMAND=timeout 600 python3 setup.py\
+        \ -v debug run LibCalls QuickSafe'\nset +e\nPYTHONUNBUFFERED=1 timeout 600 python3 setup.py -v debug run\
+        \ LibCalls QuickSafe \\\n  2>&1 | tee ../../results/quicksafe-run.log\nrc=${PIPESTATUS[0]}\nset -e\nprintf\
+        \ '%s\\n' \"$rc\" > ../../results/quicksafe-run.exit\ndate -u '+RUN_END_UTC=%Y-%m-%dT%H:%M:%SZ'\necho \"\
+        QUICKSAFE_RUN_PROCESS_EXIT=$rc\"\necho '========== RUNTIME LOG FULL NUMBERED REPLAY =========='\nnl -ba\
+        \ ../../results/quicksafe-run.log || true\necho '========== RUNTIME DIAGNOSTIC ANALYSIS =========='\npython3\
+        \ - <<'PYRUN'\nimport json, pathlib, re, os, stat\nroot = pathlib.Path('../../results')\nlog = (root / 'quicksafe-run.log').read_text(errors='replace')\n\
+        lines = log.splitlines()\nrc = int((root / 'quicksafe-run.exit').read_text())\ntarget = pathlib.Path('build/targets/LibCalls/bin/libcalls')\n\
+        patterns = {\n    'infra_fatal': r'\\[(?:FTL|ERR|FAIL)\\]',\n    'python_traceback': r'Traceback \\(most\
+        \ recent call last\\):|\\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\\b',\n  \
+        \  'command_failure': r'(?i)Command (?:execution )?failed|Status:\\s*[1-9][0-9]*',\n    'specific_missing_target':\
+        \ r'(?i)(?:target|binary|executable|libcalls)[^\\n]{0,120}(?:does not exist!|No such file or directory)',\n\
+        \    'build_system_failure': r'(?i)CMake Error|ninja: (?:error|build stopped)|make(?:\\[[0-9]+\\])?: \\\
+        *\\*\\*',\n}\nevidence = []\nfor name, pattern in patterns.items():\n    for i, line in enumerate(lines):\n\
+        \        if re.search(pattern, line):\n            evidence.append({'type': name, 'line': i + 1, 'text':\
+        \ line[:1200],\n                             'context_before': lines[max(0,i-2):i],\n                  \
+        \           'context_after': lines[i+1:i+4]})\ninformational = []\nfor i, line in enumerate(lines):\n  \
+        \  if re.search(r'(?i)(?:no raw profiling data found|found 0 raw profiling data files|nothing to parse)',\
+        \ line):\n        informational.append({'line': i+1, 'text': line[:1200]})\n# Important: \"No raw profiling\
+        \ data found\" is not a missing target.\n# The executable is independently checked on disk.\ntarget_exists\
+        \ = target.is_file()\ntarget_executable = target_exists and os.access(target, os.X_OK)\nhealthy = rc ==\
+        \ 0 and not evidence and target_executable\nresult = {\n    'process_exit': rc,\n    'target_path': str(target),\n\
+        \    'target_exists': target_exists,\n    'target_executable': target_executable,\n    'fatal_patterns':\
         \ sorted(set(e['type'] for e in evidence)),\n    'fatal_evidence': evidence,\n    'informational_profiling_messages':\
-        \ informational,\n    'run_healthy': healthy,\n    'profiling_required_for_success': False,\n    'note': 'Run and\
-        \ CLI health only. Not a QuickSafe guard-page bypass test.'\n}\n(root / 'quicksafe-run-health.json').write_text(json.dumps(result,\
+        \ informational,\n    'run_healthy': healthy,\n    'profiling_required_for_success': False,\n    'note':\
+        \ 'Run and CLI health only. Not a QuickSafe guard-page bypass test.'\n}\n(root / 'quicksafe-run-health.json').write_text(json.dumps(result,\
         \ indent=2))\n(root / 'quicksafe-run-evidence.json').write_text(json.dumps(evidence, indent=2))\nprint('==========\
-        \ EXACT FATAL MATCHES WITH CONTEXT ==========')\nif not evidence:\n    print('NO_FATAL_LOG_PATTERNS_FOUND')\nfor entry\
-        \ in evidence:\n    print(json.dumps(entry, ensure_ascii=False))\nprint('========== NON-FATAL PROFILING NOTES ==========')\n\
-        for entry in informational:\n    print(json.dumps(entry, ensure_ascii=False))\nprint('QUICKSAFE_RUN_HEALTH=' + json.dumps(result,\
-        \ ensure_ascii=False), flush=True)\nif not healthy:\n    raise SystemExit('QuickSafe runtime verification failed;\
-        \ exact matching lines printed above')\nPYRUN\necho 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'\n"
+        \ EXACT FATAL MATCHES WITH CONTEXT ==========')\nif not evidence:\n    print('NO_FATAL_LOG_PATTERNS_FOUND')\n\
+        for entry in evidence:\n    print(json.dumps(entry, ensure_ascii=False))\nprint('========== NON-FATAL PROFILING\
+        \ NOTES ==========')\nfor entry in informational:\n    print(json.dumps(entry, ensure_ascii=False))\nprint('QUICKSAFE_RUN_HEALTH='\
+        \ + json.dumps(result, ensure_ascii=False), flush=True)\nif not healthy:\n    raise SystemExit('QuickSafe\
+        \ runtime verification failed; exact matching lines printed above')\nPYRUN\necho 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'\n"
     - name: 10b - Deep QuickSafe instrumentation audit (fail closed)
       if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
       id: instrumentation_audit
       shell: bash
-      run: "set -euo pipefail\ncd QuickSafe/quicksafe\nout=../../results\ntarget=build/targets/LibCalls/bin/libcalls\npasslib=build/packages/QuickSafePass/install/lib\n\
-        echo '========== INSTRUMENTATION AUDIT =========='\necho '=== Git revision and environment ==='\ngit rev-parse HEAD\
-        \ || true\nprintf 'VP_TARGETS_STR=%q\\n' \"${VP_TARGETS_STR-}\"\necho '=== Source references to target selection ==='\n\
-        grep -RInE 'VP_TARGETS_STR|No targets found|vp-pass-loglevel|check_access|guard_alloc' \\\n  src include packages\
-        \ instances targets tests/libcalls 2>/dev/null \\\n  | head -n 180 | tee \"$out/target-selection-source.txt\" || true\n\
-        echo '=== Selected target and source context ==='\ncat \"$out/target-selector.json\" || true\necho '=== Actual generated\
-        \ LibCalls source ==='\nfor f in build/targets/LibCalls/src/*.cpp build/targets/LibCalls/src/*.c; do\n  if [ -f \"\
-        $f\" ]; then nl -ba \"$f\" | head -n 220; fi\ndone > \"$out/libcalls-numbered-source.txt\"\ncat \"$out/libcalls-numbered-source.txt\"\
-        \necho '=== Build log target-selection and pass messages ==='\ngrep -nEi 'VP_TARGETS_STR|No targets found|Running\
-        \ QuickSafe on|QuickSafe constructor|QuickSafe destructor|QuickSafePass|guard_alloc|instrument|skipping' \\\n  \"\
-        $out/quicksafe-build.log\" | tee \"$out/instrumentation-build-evidence.txt\" || true\necho '=== Link and compile command\
-        \ evidence ==='\nif [ -f build/targets/LibCalls/build/build.ninja ]; then\n  ninja -C build/targets/LibCalls/build\
-        \ -t commands \\\n    > \"$out/libcalls-build-commands.txt\" 2>&1 || true\n  cat \"$out/libcalls-build-commands.txt\"\
-        \nfi\necho '=== Dynamic loader resolution without launcher ==='\nldd \"$target\" 2>&1 | tee \"$out/ldd-without-launcher.txt\"\
-        \ || true\necho '=== Dynamic loader resolution WITH QuickSafe library paths ==='\nLD_LIBRARY_PATH=\"$PWD/$passlib:$PWD/build/packages/libbacktrace/install/lib:/usr/lib/llvm-16/lib:${LD_LIBRARY_PATH-}\"\
+      run: "set -euo pipefail\ncd QuickSafe/quicksafe\nout=../../results\ntarget=build/targets/LibCalls/bin/libcalls\n\
+        passlib=build/packages/QuickSafePass/install/lib\necho '========== INSTRUMENTATION AUDIT =========='\necho\
+        \ '=== Git revision and environment ==='\ngit rev-parse HEAD || true\nprintf 'VP_TARGETS_STR=%q\\n' \"${VP_TARGETS_STR-}\"\
+        \necho '=== Source references to target selection ==='\ngrep -RInE 'VP_TARGETS_STR|No targets found|vp-pass-loglevel|check_access|guard_alloc'\
+        \ \\\n  src include packages instances targets tests/libcalls 2>/dev/null \\\n  | head -n 180 | tee \"$out/target-selection-source.txt\"\
+        \ || true\necho '=== Selected target and source context ==='\ncat \"$out/target-selector.json\" || true\n\
+        echo '=== Actual generated LibCalls source ==='\nfor f in build/targets/LibCalls/src/*.cpp build/targets/LibCalls/src/*.c;\
+        \ do\n  if [ -f \"$f\" ]; then nl -ba \"$f\" | head -n 220; fi\ndone > \"$out/libcalls-numbered-source.txt\"\
+        \ncat \"$out/libcalls-numbered-source.txt\"\necho '=== Build log target-selection and pass messages ==='\n\
+        grep -nEi 'VP_TARGETS_STR|No targets found|Running QuickSafe on|QuickSafe constructor|QuickSafe destructor|QuickSafePass|guard_alloc|instrument|skipping'\
+        \ \\\n  \"$out/quicksafe-build.log\" | tee \"$out/instrumentation-build-evidence.txt\" || true\necho '===\
+        \ Link and compile command evidence ==='\nif [ -f build/targets/LibCalls/build/build.ninja ]; then\n  ninja\
+        \ -C build/targets/LibCalls/build -t commands \\\n    > \"$out/libcalls-build-commands.txt\" 2>&1 || true\n\
+        \  cat \"$out/libcalls-build-commands.txt\"\nfi\necho '=== Dynamic loader resolution without launcher ==='\n\
+        ldd \"$target\" 2>&1 | tee \"$out/ldd-without-launcher.txt\" || true\necho '=== Dynamic loader resolution\
+        \ WITH QuickSafe library paths ==='\nLD_LIBRARY_PATH=\"$PWD/$passlib:$PWD/build/packages/libbacktrace/install/lib:/usr/lib/llvm-16/lib:${LD_LIBRARY_PATH-}\"\
         \ \\\n  ldd \"$target\" 2>&1 | tee \"$out/ldd-with-quicksafe-path.txt\" || true\necho '=== ELF dynamic dependencies\
-        \ ==='\nreadelf -dW \"$target\" 2>&1 | tee \"$out/libcalls-dynamic-section.txt\" || true\necho '=== ELF symbols associated\
-        \ with QuickSafe ==='\n{ nm -aC \"$target\" 2>&1 || true; echo '--- dynamic ---'; nm -DC \"$target\" 2>&1 || true;\
-        \ } \\\n  | tee \"$out/libcalls-symbols.txt\" | grep -Ei 'quicksafe|guard_|check_access|mprotect|track_global' | head\
-        \ -n 100 || true\necho '=== Disassembly markers (bounded) ==='\nobjdump -dC \"$target\" 2>/dev/null | grep -Ein 'guard_alloc|guard_dealloc|check_access|mprotect'\
-        \ \\\n  | head -n 100 | tee \"$out/libcalls-disassembly-markers.txt\" || true\necho '=== Machine-readable assessment\
-        \ ==='\npython3 - <<'PY'\nimport json, os, pathlib, re\nout=pathlib.Path('../../results')\nbuild=(out/'quicksafe-build.log').read_text(errors='replace')\n\
-        run=(out/'quicksafe-run.log').read_text(errors='replace') if (out/'quicksafe-run.log').exists() else ''\ndynamic=(out/'ldd-with-quicksafe-path.txt').read_text(errors='replace')\n\
+        \ ==='\nreadelf -dW \"$target\" 2>&1 | tee \"$out/libcalls-dynamic-section.txt\" || true\necho '=== ELF\
+        \ symbols associated with QuickSafe ==='\n{ nm -aC \"$target\" 2>&1 || true; echo '--- dynamic ---'; nm\
+        \ -DC \"$target\" 2>&1 || true; } \\\n  | tee \"$out/libcalls-symbols.txt\" | grep -Ei 'quicksafe|guard_|check_access|mprotect|track_global'\
+        \ | head -n 100 || true\necho '=== Disassembly markers (bounded) ==='\nobjdump -dC \"$target\" 2>/dev/null\
+        \ | grep -Ein 'guard_alloc|guard_dealloc|check_access|mprotect' \\\n  | head -n 100 | tee \"$out/libcalls-disassembly-markers.txt\"\
+        \ || true\necho '=== Machine-readable assessment ==='\npython3 - <<'PY'\nimport json, os, pathlib, re\n\
+        out=pathlib.Path('../../results')\nbuild=(out/'quicksafe-build.log').read_text(errors='replace')\nrun=(out/'quicksafe-run.log').read_text(errors='replace')\
+        \ if (out/'quicksafe-run.log').exists() else ''\ndynamic=(out/'ldd-with-quicksafe-path.txt').read_text(errors='replace')\n\
         symbols=(out/'libcalls-symbols.txt').read_text(errors='replace')\nsource=(out/'target-selection-source.txt').read_text(errors='replace')\n\
         # Audit the SUCCESSFUL rebuild, not the earlier exploratory build.\nattempts=json.loads((out/'selector-attempts.json').read_text())\
         \ if (out/'selector-attempts.json').exists() else {}\nverified=attempts.get('verified') or {}\nlog_value=verified.get('log','')\n\
-        selected_log=pathlib.Path(log_value) if log_value else None\nif selected_log and not selected_log.is_file():\n   \
-        \ fallback=out/pathlib.Path(log_value).name\n    selected_log=fallback if fallback.is_file() else None\nif not selected_log\
-        \ or not selected_log.is_file():\n    raise SystemExit('FAIL CLOSED: selected rebuild log missing: '+repr(log_value))\n\
-        selected_text=selected_log.read_text(errors='replace')\nskip=[{'line':i,'text':line.strip()} for i,line in enumerate(selected_text.splitlines(),1)\n\
-        \      if re.search(r'No targets found in \\$VP_TARGETS_STR; skipping',line)]\npass_invoked=bool(re.search(r'Running\
-        \ QuickSafe on:',selected_text))\nplugin_linked=bool(re.search(r'--load-pass-plugin(?:=|\\s)',selected_text))\nmissing_libs=[line.strip()\
-        \ for line in dynamic.splitlines() if '=> not found' in line]\nselected=(out/'verified-target-selector.txt').read_text().strip()\
-        \ if (out/'verified-target-selector.txt').exists() else ''\ntarget_specified=bool(selected) and selected==os.environ.get('VP_TARGETS_STR','').strip()\n\
-        runtime_symbols=bool(re.search(r'guard_alloc|guard_dealloc|check_access|quicksafe\\.globals_ctor',symbols,re.I))\n\
-        provenance=json.loads((out/'verified-binary-provenance.json').read_text()) if (out/'verified-binary-provenance.json').exists()\
-        \ else {}\nimport hashlib\nbinary=pathlib.Path('build/targets/LibCalls/bin/libcalls')\ncurrent_hash=hashlib.sha256(binary.read_bytes()).hexdigest()\
-        \ if binary.is_file() else None\nhash_matches=bool(current_hash and current_hash==provenance.get('sha256_after_instrumented_rebuild'))\n\
-        counts=verified.get('counts',{})\nnonzero=(max(counts.get('targets') or [0])>0 and\n         max(counts.get('defsites')\
-        \ or [0])>0 and\n         max((counts.get('heap') or [])+(counts.get('stack') or [0]))>0)\nproven=(not skip and target_specified\
+        selected_log=pathlib.Path(log_value) if log_value else None\nif selected_log and not selected_log.is_file():\n\
+        \    fallback=out/pathlib.Path(log_value).name\n    selected_log=fallback if fallback.is_file() else None\n\
+        if not selected_log or not selected_log.is_file():\n    raise SystemExit('FAIL CLOSED: selected rebuild\
+        \ log missing: '+repr(log_value))\nselected_text=selected_log.read_text(errors='replace')\nskip=[{'line':i,'text':line.strip()}\
+        \ for i,line in enumerate(selected_text.splitlines(),1)\n      if re.search(r'No targets found in \\$VP_TARGETS_STR;\
+        \ skipping',line)]\npass_invoked=bool(re.search(r'Running QuickSafe on:',selected_text))\nplugin_linked=bool(re.search(r'--load-pass-plugin(?:=|\\\
+        s)',selected_text))\nmissing_libs=[line.strip() for line in dynamic.splitlines() if '=> not found' in line]\n\
+        selected=(out/'verified-target-selector.txt').read_text().strip() if (out/'verified-target-selector.txt').exists()\
+        \ else ''\ntarget_specified=bool(selected) and selected==os.environ.get('VP_TARGETS_STR','').strip()\nruntime_symbols=bool(re.search(r'guard_alloc|guard_dealloc|check_access|quicksafe\\\
+        .globals_ctor',symbols,re.I))\nprovenance=json.loads((out/'verified-binary-provenance.json').read_text())\
+        \ if (out/'verified-binary-provenance.json').exists() else {}\nimport hashlib\nbinary=pathlib.Path('build/targets/LibCalls/bin/libcalls')\n\
+        current_hash=hashlib.sha256(binary.read_bytes()).hexdigest() if binary.is_file() else None\nhash_matches=bool(current_hash\
+        \ and current_hash==provenance.get('sha256_after_instrumented_rebuild'))\ncounts=verified.get('counts',{})\n\
+        nonzero=(max(counts.get('targets') or [0])>0 and\n         max(counts.get('defsites') or [0])>0 and\n  \
+        \       max((counts.get('heap') or [])+(counts.get('stack') or [0]))>0)\nproven=(not skip and target_specified\
         \ and not missing_libs and\n        bool(verified.get('verified')) and nonzero and hash_matches)\nreport={'pass_invoked_in_selected_rebuild':pass_invoked,'plugin_linked_in_selected_rebuild':plugin_linked,\n\
         \        'target_specified_in_step_environment':target_specified,\n        'selected_rebuild_target_selection_skipped':bool(skip),'selected_rebuild_skip_evidence':skip,\n\
         \        'runtime_symbols_detected':runtime_symbols,\n        'missing_runtime_libraries_with_explicit_path':missing_libs,\n\
         \        'instrumentation_preconditions_met':proven,\n        'targeted_allocation_instrumented':bool(verified.get('verified'))\
-        \ and nonzero,\n        'verified_instrumentation_counts':counts,\n        'target_selector':selected,\n        'final_binary_sha256':current_hash,\n\
-        \        'binary_matches_instrumented_rebuild':hash_matches,\n        'selected_rebuild_log':str(selected_log) if\
-        \ selected_log else None,\n        'memory_access_instrumentation_behavior_verified':False,\n        'protected_guard_bypass_tested':False,\n\
-        \        'note':'Verified allocation transformation and executable provenance are not equivalent to verified guard-page\
-        \ runtime behavior.'}\n(out/'instrumentation-audit.json').write_text(json.dumps(report,indent=2))\nprint('QUICKSAFE_INSTRUMENTATION_AUDIT='+json.dumps(report,indent=2),flush=True)\n\
-        if not proven:\n    raise SystemExit('FAIL CLOSED: QuickSafe target instrumentation not established. Inspect VP_TARGETS_STR\
-        \ and source target-selection evidence.')\nPY\n"
+        \ and nonzero,\n        'verified_instrumentation_counts':counts,\n        'target_selector':selected,\n\
+        \        'final_binary_sha256':current_hash,\n        'binary_matches_instrumented_rebuild':hash_matches,\n\
+        \        'selected_rebuild_log':str(selected_log) if selected_log else None,\n        'memory_access_instrumentation_behavior_verified':False,\n\
+        \        'protected_guard_bypass_tested':False,\n        'note':'Verified allocation transformation and\
+        \ executable provenance are not equivalent to verified guard-page runtime behavior.'}\n(out/'instrumentation-audit.json').write_text(json.dumps(report,indent=2))\n\
+        print('QUICKSAFE_INSTRUMENTATION_AUDIT='+json.dumps(report,indent=2),flush=True)\nif not proven:\n    raise\
+        \ SystemExit('FAIL CLOSED: QuickSafe target instrumentation not established. Inspect VP_TARGETS_STR and\
+        \ source target-selection evidence.')\nPY\n"
       continue-on-error: true
     - name: 10c - Run actual instrumented QuickSafe protected allocation probe
       shell: bash
       run: "set -euo pipefail\ncd QuickSafe/quicksafe\npython3 - <<'PYPROBE'\nimport hashlib,json,os,pathlib,re,subprocess\n\
-        out=pathlib.Path('../../results')\nbinary=pathlib.Path('build/targets/LibCalls/bin/libcalls').resolve()\nprov=json.loads((out/'verified-binary-provenance.json').read_text())\n\
-        digest=hashlib.sha256(binary.read_bytes()).hexdigest()\nif digest!=prov['sha256_after_instrumented_rebuild']: raise\
-        \ SystemExit('FAIL CLOSED: binary hash changed')\npage=os.sysconf('SC_PAGE_SIZE')\nlib=pathlib.Path('build/packages/QuickSafePass/install/lib').resolve()\n\
+        out=pathlib.Path('../../results')\nbinary=pathlib.Path('build/targets/LibCalls/bin/libcalls').resolve()\n\
+        prov=json.loads((out/'verified-binary-provenance.json').read_text())\ndigest=hashlib.sha256(binary.read_bytes()).hexdigest()\n\
+        if digest!=prov['sha256_after_instrumented_rebuild']: raise SystemExit('FAIL CLOSED: binary hash changed')\n\
+        page=os.sysconf('SC_PAGE_SIZE')\nlib=pathlib.Path('build/packages/QuickSafePass/install/lib').resolve()\n\
         env=os.environ.copy()\nenv['LD_LIBRARY_PATH']=str(lib)+':'+str(pathlib.Path('build/packages/libbacktrace/install/lib').resolve())+':/usr/lib/llvm-16/lib:'+env.get('LD_LIBRARY_PATH','')\n\
-        # Runtime crash diagnostics quote source lines containing QS_READ_OK=1.\n# Only accept a complete, standalone marker\
-        \ AND a clean process exit.\ndef marker(output, name):\n    return re.search(r'(?m)^'+re.escape(name)+r'=1\\s*$',\
-        \ output) is not None\ndef classify(rc, output):\n    success=rc == 0 and marker(output,'QS_READ_OK')\n    fatal=rc\
-        \ in (-11,-7,123) or bool(re.search(r'(?m)^\\[QuickSafeRT\\].*(?:SIGSEGV|Segfault .*fatal)',output))\n    if success:\
-        \ return 'READ_SUCCEEDED'\n    if rc is None: return 'TIMEOUT'\n    if fatal: return 'FAULT'\n    return 'OTHER_EXIT'\n\
-        # Fail closed if diagnostic source excerpts can forge a success marker.\nassert classify(123,'QS_READ_BEGIN=1\\n \
-        \   std::cout << \"QS_READ_OK=1\\\\n\";\\n[QuickSafeRT] Caught SIGSEGV') == 'FAULT'\nassert classify(0,'QS_READ_BEGIN=1\\\
-        nQS_READ_OK=1\\n') == 'READ_SUCCEEDED'\nassert classify(123,'QS_READ_OK=1\\n[QuickSafeRT] Segfault is fatal') == 'FAULT'\n\
-        assert classify(None,'TIMEOUT') == 'TIMEOUT'\nresults=[]\n# Probe both sides of every page boundary and multiple distant\
-        \ pages.\n# Each read occurs in its own process so a SIGSEGV cannot terminate the matrix.\noffsets={0,1,2,7,15,31,32,47,62,63,64,65,66,95,127,128,129,255,256,511,512,1023,1024}\n\
+        # Runtime crash diagnostics quote source lines containing QS_READ_OK=1.\n# Only accept a complete, standalone\
+        \ marker AND a clean process exit.\ndef marker(output, name):\n    return re.search(r'(?m)^'+re.escape(name)+r'=1\\\
+        s*$', output) is not None\ndef classify(rc, output):\n    success=rc == 0 and marker(output,'QS_READ_OK')\n\
+        \    fatal=rc in (-11,-7,123) or bool(re.search(r'(?m)^\\[QuickSafeRT\\].*(?:SIGSEGV|Segfault .*fatal)',output))\n\
+        \    if success: return 'READ_SUCCEEDED'\n    if rc is None: return 'TIMEOUT'\n    if fatal: return 'FAULT'\n\
+        \    return 'OTHER_EXIT'\n# Fail closed if diagnostic source excerpts can forge a success marker.\nassert\
+        \ classify(123,'QS_READ_BEGIN=1\\n    std::cout << \"QS_READ_OK=1\\\\n\";\\n[QuickSafeRT] Caught SIGSEGV')\
+        \ == 'FAULT'\nassert classify(0,'QS_READ_BEGIN=1\\nQS_READ_OK=1\\n') == 'READ_SUCCEEDED'\nassert classify(123,'QS_READ_OK=1\\\
+        n[QuickSafeRT] Segfault is fatal') == 'FAULT'\nassert classify(None,'TIMEOUT') == 'TIMEOUT'\nresults=[]\n\
+        # Probe both sides of every page boundary and multiple distant pages.\n# Each read occurs in its own process\
+        \ so a SIGSEGV cannot terminate the matrix.\noffsets={0,1,2,7,15,31,32,47,62,63,64,65,66,95,127,128,129,255,256,511,512,1023,1024}\n\
         for boundary in [page,2*page,3*page,4*page,8*page,16*page,32*page,64*page,128*page]:\n    for delta in [-64,-2,-1,0,1,2,63,64]:\n\
         \        if boundary+delta>=0: offsets.add(boundary+delta)\nfor offset in sorted(offsets):\n    env['QS_V17_OFFSET']=str(offset)\n\
         \    try:\n        proc=subprocess.run([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=20)\n\
         \        rc,output=proc.returncode,proc.stdout\n    except subprocess.TimeoutExpired as exc:\n        rc,output=None,str(exc.stdout\
-        \ or '')+'\\nTIMEOUT'\n    logfile=out/f'protected-offset-{offset}.log';logfile.write_text(output)\n    print(f'===\
-        \ PROTECTED OFFSET {offset} EXIT {rc} READ_OK={rc==0 and marker(output,'QS_READ_OK')} ===',flush=True)\n    perms=re.findall(r'^QS_TARGET_MAPPING_PERMS=([^\\\
-        n]+)',output,re.M)\n    guard=re.findall(r'^QS_PAGE_PLUS_ONE_PERMS=([^\\n]+)',output,re.M)\n    outcome=classify(rc,output)\n\
-        \    # Derive interval evidence ONLY from the same child process's maps.\n    # /proc/self/maps describes page mappings;\
-        \ it does not by itself\n    # establish which QuickSafe runtime check (if any) guarded a read.\n    base_match=re.search(r'(?m)^QS_BASE=0x([0-9a-fA-F]+)$',output)\n\
-        \    addr_match=re.search(r'(?m)^QS_ADDR=0x([0-9a-fA-F]+)$',output)\n    base=int(base_match.group(1),16) if base_match\
-        \ else None\n    target=int(addr_match.group(1),16) if addr_match else None\n    maps=[]\n    for mm in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\\
-        s+([rwxps-]{4})(?:\\s|$)',output):\n        maps.append({'start':int(mm.group(1),16),'end':int(mm.group(2),16),'perms':mm.group(3)})\n\
-        \    base_map=next((m for m in maps if base is not None and m['start']<=base<m['end']),None)\n    target_map=next((m\
-        \ for m in maps if target is not None and m['start']<=target<m['end']),None)\n    # A true skip must start in the\
+        \ or '')+'\\nTIMEOUT'\n    logfile=out/f'protected-offset-{offset}.log';logfile.write_text(output)\n   \
+        \ print(f'=== PROTECTED OFFSET {offset} EXIT {rc} READ_OK={rc==0 and marker(output,'QS_READ_OK')} ===',flush=True)\n\
+        \    perms=re.findall(r'^QS_TARGET_MAPPING_PERMS=([^\\n]+)',output,re.M)\n    guard=re.findall(r'^QS_PAGE_PLUS_ONE_PERMS=([^\\\
+        n]+)',output,re.M)\n    outcome=classify(rc,output)\n    # Derive interval evidence ONLY from the same child\
+        \ process's maps.\n    # /proc/self/maps describes page mappings; it does not by itself\n    # establish\
+        \ which QuickSafe runtime check (if any) guarded a read.\n    base_match=re.search(r'(?m)^QS_BASE=0x([0-9a-fA-F]+)$',output)\n\
+        \    addr_match=re.search(r'(?m)^QS_ADDR=0x([0-9a-fA-F]+)$',output)\n    base=int(base_match.group(1),16)\
+        \ if base_match else None\n    target=int(addr_match.group(1),16) if addr_match else None\n    maps=[]\n\
+        \    for mm in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\s+([rwxps-]{4})(?:\\s|$)',output):\n\
+        \        maps.append({'start':int(mm.group(1),16),'end':int(mm.group(2),16),'perms':mm.group(3)})\n    base_map=next((m\
+        \ for m in maps if base is not None and m['start']<=base<m['end']),None)\n    target_map=next((m for m in\
+        \ maps if target is not None and m['start']<=target<m['end']),None)\n    # A true skip must start in the\
         \ allocation, cross a whole\n    # inaccessible mapped interval, and end in readable memory.\n    intervening_guards=[m\
-        \ for m in maps if base is not None and target is not None\n                        and base<m['start'] and m['end']<=target\n\
-        \                        and m['perms'].startswith('---')]\n    verified_skip=(outcome=='READ_SUCCEEDED' and base\
-        \ is not None and\n                   target is not None and target>=base+64 and\n                   base_map is not\
-        \ None and 'r' in base_map['perms'] and\n                   target_map is not None and 'r' in target_map['perms']\
-        \ and\n                   bool(intervening_guards))\n    results.append({'offset':offset,'exit_code':rc,\n       \
-        \ 'allocation_base':base,'target_address':target,\n        'base_mapping':base_map,'destination_mapping':target_map,\n\
+        \ for m in maps if base is not None and target is not None\n                        and base<m['start']\
+        \ and m['end']<=target\n                        and m['perms'].startswith('---')]\n    verified_skip=(outcome=='READ_SUCCEEDED'\
+        \ and base is not None and\n                   target is not None and target>=base+64 and\n            \
+        \       base_map is not None and 'r' in base_map['perms'] and\n                   target_map is not None\
+        \ and 'r' in target_map['perms'] and\n                   bool(intervening_guards))\n    results.append({'offset':offset,'exit_code':rc,\n\
+        \        'allocation_base':base,'target_address':target,\n        'base_mapping':base_map,'destination_mapping':target_map,\n\
         \        'intervening_inaccessible_intervals':intervening_guards,\n        'guard_interval_skipped_by_completed_read':verified_skip,\n\
-        \        'mapping_parse_count':len(maps),\n        'read_started':marker(output,'QS_READ_BEGIN'),\n        'read_completed':outcome=='READ_SUCCEEDED',\n\
-        \        'read_success_marker_present':marker(output,'QS_READ_OK'),\n        'signal':-rc if rc is not None and rc<0\
-        \ else None,\n        'target_mapping_permissions':perms,'page_plus_one_permissions':guard,\n        'log':str(logfile),'read_faulted':outcome=='FAULT',\n\
-        \        'timed_out':outcome=='TIMEOUT','classification':outcome})\nbase_ok=results[0]['read_completed'] and results[0]['exit_code']==0\n\
-        guard_observed=any(x['page_plus_one_permissions'] and x['page_plus_one_permissions'][0].startswith('---') for x in\
-        \ results)\ndistant_read=any(x['offset']>=2*page and x['read_completed'] and x['target_mapping_permissions'] and x['target_mapping_permissions'][0].startswith('r')\
-        \ for x in results)\nguard_faults=sum(x['classification']=='FAULT' and any(p.startswith('---') for p in x['target_mapping_permissions'])\
-        \ for x in results)\nobject_oob_success=sum(x['offset']>=64 and x['read_completed'] for x in results)\ninterval_skips=[x\
-        \ for x in results if x['guard_interval_skipped_by_completed_read']]\n# This establishes an address-space guard skip,\
-        \ NOT necessarily a\n# vulnerability in QuickSafe's intended threat model or access checks.\nreport={'experiment':'ACTUAL_QUICKSAFE_INSTRUMENTED_LIBCALLS_PROBE','selector':prov['selector'],\n\
+        \        'mapping_parse_count':len(maps),\n        'read_started':marker(output,'QS_READ_BEGIN'),\n    \
+        \    'read_completed':outcome=='READ_SUCCEEDED',\n        'read_success_marker_present':marker(output,'QS_READ_OK'),\n\
+        \        'signal':-rc if rc is not None and rc<0 else None,\n        'target_mapping_permissions':perms,'page_plus_one_permissions':guard,\n\
+        \        'log':str(logfile),'read_faulted':outcome=='FAULT',\n        'timed_out':outcome=='TIMEOUT','classification':outcome})\n\
+        base_ok=results[0]['read_completed'] and results[0]['exit_code']==0\nguard_observed=any(x['page_plus_one_permissions']\
+        \ and x['page_plus_one_permissions'][0].startswith('---') for x in results)\ndistant_read=any(x['offset']>=2*page\
+        \ and x['read_completed'] and x['target_mapping_permissions'] and x['target_mapping_permissions'][0].startswith('r')\
+        \ for x in results)\nguard_faults=sum(x['classification']=='FAULT' and any(p.startswith('---') for p in\
+        \ x['target_mapping_permissions']) for x in results)\nobject_oob_success=sum(x['offset']>=64 and x['read_completed']\
+        \ for x in results)\ninterval_skips=[x for x in results if x['guard_interval_skipped_by_completed_read']]\n\
+        # This establishes an address-space guard skip, NOT necessarily a\n# vulnerability in QuickSafe's intended\
+        \ threat model or access checks.\nreport={'experiment':'ACTUAL_QUICKSAFE_INSTRUMENTED_LIBCALLS_PROBE','selector':prov['selector'],\n\
         \ 'final_binary_sha256':digest,'probe_in_final_binary':b'QS_PROBE_BEGIN' in binary.read_bytes(),\n 'baseline_inbounds_read_ok':base_ok,'cases':results,\n\
-        \ 'guard_mapping_observed_at_base_plus_page':guard_observed,\n 'mapped_distant_read_observed':distant_read,\n 'per_process_guard_interval_skip_count':len(interval_skips),\n\
-        \ 'per_process_guard_interval_skip_offsets':[x['offset'] for x in interval_skips],\n 'case_count':len(results),\n\
-        \ 'counts_by_outcome':{k:sum(x['classification']==k for x in results) for k in ['READ_SUCCEEDED','FAULT','TIMEOUT','OTHER_EXIT']},\n\
-        \ 'page_size':page,'faults_on_inaccessible_mapping':guard_faults,\n 'object_out_of_bounds_reads_completed':object_oob_success,\n\
-        \ 'classification_method':'Only exact standalone QS_READ_OK=1 with exit 0 means success; QuickSafe fatal exit 123\
-        \ and SIGSEGV are faults.',\n 'test_design':'In-bounds, near-boundary, page-straddling, distant page, and mapping-permission\
-        \ correlation. One fresh process per case.',\n 'protected_guard_bypass_candidate':bool(base_ok and interval_skips),\n\
-        \ 'protected_guard_bypass_confirmed':False,\n 'limitations':'Per-process /proc/self/maps evidence proves virtual-address\
-        \ interval geometry, not QuickSafe policy enforcement. A successful read after an inaccessible mapping can be a guard\
-        \ skip without being a QuickSafe vulnerability. The tests perform reads only; independently verify QuickSafe access-check\
-        \ instrumentation and intended security contract.'}\n(out/'protected-runtime-experiment.json').write_text(json.dumps(report,indent=2))\n\
+        \ 'guard_mapping_observed_at_base_plus_page':guard_observed,\n 'mapped_distant_read_observed':distant_read,\n\
+        \ 'per_process_guard_interval_skip_count':len(interval_skips),\n 'per_process_guard_interval_skip_offsets':[x['offset']\
+        \ for x in interval_skips],\n 'case_count':len(results),\n 'counts_by_outcome':{k:sum(x['classification']==k\
+        \ for x in results) for k in ['READ_SUCCEEDED','FAULT','TIMEOUT','OTHER_EXIT']},\n 'page_size':page,'faults_on_inaccessible_mapping':guard_faults,\n\
+        \ 'object_out_of_bounds_reads_completed':object_oob_success,\n 'classification_method':'Only exact standalone\
+        \ QS_READ_OK=1 with exit 0 means success; QuickSafe fatal exit 123 and SIGSEGV are faults.',\n 'test_design':'In-bounds,\
+        \ near-boundary, page-straddling, distant page, and mapping-permission correlation. One fresh process per\
+        \ case.',\n 'protected_guard_bypass_candidate':bool(base_ok and interval_skips),\n 'protected_guard_bypass_confirmed':False,\n\
+        \ 'limitations':'Per-process /proc/self/maps evidence proves virtual-address interval geometry, not QuickSafe\
+        \ policy enforcement. A successful read after an inaccessible mapping can be a guard skip without being\
+        \ a QuickSafe vulnerability. The tests perform reads only; independently verify QuickSafe access-check instrumentation\
+        \ and intended security contract.'}\n(out/'protected-runtime-experiment.json').write_text(json.dumps(report,indent=2))\n\
         print('PROTECTED_RUNTIME_EXPERIMENT_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)\n\
-        if sum(report['counts_by_outcome'].values())!=len(results):\n    raise SystemExit('FAIL CLOSED: classification counts\
-        \ inconsistent')\nif any(x['exit_code']!=0 and x['read_completed'] for x in results):\n    raise SystemExit('FAIL\
-        \ CLOSED: nonzero exit incorrectly marked successful')\nif any(x['guard_interval_skipped_by_completed_read'] and not\
-        \ x['read_completed'] for x in results):\n    raise SystemExit('FAIL CLOSED: interval skip flagged without completed\
-        \ read')\nif not report['probe_in_final_binary'] or not base_ok:\n    raise SystemExit('FAIL CLOSED: in-bounds instrumented\
-        \ baseline did not complete')\nPYPROBE\n"
+        if sum(report['counts_by_outcome'].values())!=len(results):\n    raise SystemExit('FAIL CLOSED: classification\
+        \ counts inconsistent')\nif any(x['exit_code']!=0 and x['read_completed'] for x in results):\n    raise\
+        \ SystemExit('FAIL CLOSED: nonzero exit incorrectly marked successful')\nif any(x['guard_interval_skipped_by_completed_read']\
+        \ and not x['read_completed'] for x in results):\n    raise SystemExit('FAIL CLOSED: interval skip flagged\
+        \ without completed read')\nif not report['probe_in_final_binary'] or not base_ok:\n    raise SystemExit('FAIL\
+        \ CLOSED: in-bounds instrumented baseline did not complete')\nPYPROBE\n"
       continue-on-error: true
     - name: 10d - Twenty mapped-destination guard-jump cases and differential controls
       shell: bash
-      run: "set -euo pipefail\nmkdir -p results/jump-cases\ncat > results/jump-control.c <<'C'\n#define _GNU_SOURCE\n#include\
-        \ <sys/mman.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <string.h>\n\
-        #include <inttypes.h>\n#include <errno.h>\n#include <limits.h>\n__attribute__((noinline)) static unsigned char do_read(volatile\
-        \ unsigned char *p) {return *p;}\n__attribute__((noinline)) static uint64_t do_read64(volatile uint64_t *p) {return\
-        \ *p;}\n__attribute__((noinline)) static void do_read16(volatile unsigned char *p, unsigned char *dst) {for(int i=0;i<16;i++)dst[i]=p[i];}\n\
-        __attribute__((noinline)) static void do_write(volatile unsigned char *p) {*p=0x7b;}\n__attribute__((noinline)) static\
-        \ unsigned char helper(volatile unsigned char *p) {return do_read(p);}\nint main(int argc,char **argv) {\n  if(argc!=7)return\
-        \ 90;\n  int id=atoi(argv[1]); size_t guards=strtoull(argv[2],0,10);\n  int opt=atoi(argv[3]); int readonly=atoi(argv[4]);\
-        \ int unaligned=atoi(argv[5]);\n  int protect=atoi(argv[6]);\n  long lpg=sysconf(_SC_PAGESIZE); if(lpg<=0)return 91;\n\
-        \  size_t pg=(size_t)lpg, pages=guards+4;\n  if(guards<1||guards>128||pages>SIZE_MAX/pg)return 92;\n  unsigned char\
-        \ *base=mmap(NULL,pages*pg,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);\n  if(base==MAP_FAILED){perror(\"\
+      run: "set -euo pipefail\nmkdir -p results/jump-cases\ncat > results/jump-control.c <<'C'\n#define _GNU_SOURCE\n\
+        #include <sys/mman.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n\
+        #include <string.h>\n#include <inttypes.h>\n#include <errno.h>\n#include <limits.h>\n__attribute__((noinline))\
+        \ static unsigned char do_read(volatile unsigned char *p) {return *p;}\n__attribute__((noinline)) static\
+        \ uint64_t do_read64(volatile uint64_t *p) {return *p;}\n__attribute__((noinline)) static void do_read16(volatile\
+        \ unsigned char *p, unsigned char *dst) {for(int i=0;i<16;i++)dst[i]=p[i];}\n__attribute__((noinline)) static\
+        \ void do_write(volatile unsigned char *p) {*p=0x7b;}\n__attribute__((noinline)) static unsigned char helper(volatile\
+        \ unsigned char *p) {return do_read(p);}\nint main(int argc,char **argv) {\n  if(argc!=7)return 90;\n  int\
+        \ id=atoi(argv[1]); size_t guards=strtoull(argv[2],0,10);\n  int opt=atoi(argv[3]); int readonly=atoi(argv[4]);\
+        \ int unaligned=atoi(argv[5]);\n  int protect=atoi(argv[6]);\n  long lpg=sysconf(_SC_PAGESIZE); if(lpg<=0)return\
+        \ 91;\n  size_t pg=(size_t)lpg, pages=guards+4;\n  if(guards<1||guards>128||pages>SIZE_MAX/pg)return 92;\n\
+        \  unsigned char *base=mmap(NULL,pages*pg,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);\n  if(base==MAP_FAILED){perror(\"\
         mmap\");return 93;}\n  unsigned char *object=base+(unaligned?17:0);\n  unsigned char *g=base+pg;\n  if(mprotect(g,guards*pg,PROT_NONE)){perror(\"\
-        mprotect guard\");return 94;}\n  unsigned char *dest=g+guards*pg;\n  // Case 15: add a second guard separated by an\
-        \ accessible page.\n  // Case 16: use a second readable page after the first destination.\n  if(id==15){if(mprotect(dest+pg,pg,PROT_NONE))return\
+        mprotect guard\");return 94;}\n  unsigned char *dest=g+guards*pg;\n  // Case 15: add a second guard separated\
+        \ by an accessible page.\n  // Case 16: use a second readable page after the first destination.\n  if(id==15){if(mprotect(dest+pg,pg,PROT_NONE))return\
         \ 95;dest+=2*pg;}\n  if(id==16)dest+=pg;\n  if(dest>=base+pages*pg)return 96;\n  size_t within=0;\n  switch(id){case\
         \ 2:within=1;break;case 3:within=16;break;case 4:within=64;break;\n    case 5:within=256;break;case 6:within=1024;break;case\
-        \ 7:within=pg-1;break;\n    default:break;}\n  size_t width=(id==17?8:id==18?16:1);\n  if(within+width>pg)return 97;\n\
-        \  unsigned char *target=dest+within;\n  if(readonly && id!=19){\n    // Make all accessible destination pages read-only,\
-        \ including the target.\n    if(mprotect(dest,pg,PROT_READ))return 98;\n  }\n  // Case 19 must remain writable to\
-        \ distinguish write enforcement from OS faults.\n  *object=0x35;\n  if(!readonly||id==19)*target=0x42;\n  printf(\"\
-        QS21_CASE=%d\\nQS21_BASE=%p\\nQS21_OBJECT=%p\\nQS21_GUARD_START=%p\\nQS21_GUARD_END=%p\\nQS21_DEST=%p\\nQS21_TARGET=%p\\\
-        nQS21_PAGE_SIZE=%zu\\nQS21_WIDTH=%zu\\nQS21_READONLY=%d\\nQS21_OPT=%d\\nQS21_UNALIGNED=%d\\nQS21_POLICY=%d\\n\",id,(void*)base,(void*)object,(void*)g,(void*)(g+guards*pg),(void*)dest,(void*)target,pg,width,readonly,opt,unaligned,protect);\n\
+        \ 7:within=pg-1;break;\n    default:break;}\n  size_t width=(id==17?8:id==18?16:1);\n  if(within+width>pg)return\
+        \ 97;\n  unsigned char *target=dest+within;\n  if(readonly && id!=19){\n    // Make all accessible destination\
+        \ pages read-only, including the target.\n    if(mprotect(dest,pg,PROT_READ))return 98;\n  }\n  // Case\
+        \ 19 must remain writable to distinguish write enforcement from OS faults.\n  *object=0x35;\n  if(!readonly||id==19)*target=0x42;\n\
+        \  printf(\"QS21_CASE=%d\\nQS21_BASE=%p\\nQS21_OBJECT=%p\\nQS21_GUARD_START=%p\\nQS21_GUARD_END=%p\\nQS21_DEST=%p\\\
+        nQS21_TARGET=%p\\nQS21_PAGE_SIZE=%zu\\nQS21_WIDTH=%zu\\nQS21_READONLY=%d\\nQS21_OPT=%d\\nQS21_UNALIGNED=%d\\\
+        nQS21_POLICY=%d\\n\",id,(void*)base,(void*)object,(void*)g,(void*)(g+guards*pg),(void*)dest,(void*)target,pg,width,readonly,opt,unaligned,protect);\n\
         \  FILE *fp=fopen(\"/proc/self/maps\",\"r\"); char line[1024];\n  if(!fp)return 99;\n  while(fgets(line,sizeof(line),fp)){\n\
-        \    uintptr_t a=0,b=0;\n    if(sscanf(line,\"%\" SCNxPTR \"-%\" SCNxPTR,&a,&b)==2 && b>(uintptr_t)base && a<(uintptr_t)(base+pages*pg))printf(\"\
-        QS21_MAP=%s\",line);\n  }\n  fclose(fp);\n  printf(\"QS21_ACCESS_BEGIN=1\\n\");fflush(stdout);\n  if(protect){\n \
-        \   // Deliberately strict reference policy: the object is only one page.\n    // This is NOT QuickSafe instrumentation;\
-        \ it is a control oracle.\n    printf(\"QS21_POLICY_BLOCKED=1\\n\");fflush(stdout);return 40;\n  }\n  if(id==19){do_write(target);printf(\"\
-        QS21_WRITE_OK=1\\nQS21_SENTINEL=%u\\n\",(unsigned)*target);}\n  else if(id==17){uint64_t x=do_read64((volatile uint64_t*)target);printf(\"\
-        QS21_READ_OK=1\\nQS21_VALUE=%\" PRIu64 \"\\n\",x);}\n  else if(id==18){unsigned char buf[16];do_read16(target,buf);printf(\"\
+        \    uintptr_t a=0,b=0;\n    if(sscanf(line,\"%\" SCNxPTR \"-%\" SCNxPTR,&a,&b)==2 && b>(uintptr_t)base\
+        \ && a<(uintptr_t)(base+pages*pg))printf(\"QS21_MAP=%s\",line);\n  }\n  fclose(fp);\n  printf(\"QS21_ACCESS_BEGIN=1\\\
+        n\");fflush(stdout);\n  if(protect){\n    // Deliberately strict reference policy: the object is only one\
+        \ page.\n    // This is NOT QuickSafe instrumentation; it is a control oracle.\n    printf(\"QS21_POLICY_BLOCKED=1\\\
+        n\");fflush(stdout);return 40;\n  }\n  if(id==19){do_write(target);printf(\"QS21_WRITE_OK=1\\nQS21_SENTINEL=%u\\\
+        n\",(unsigned)*target);}\n  else if(id==17){uint64_t x=do_read64((volatile uint64_t*)target);printf(\"QS21_READ_OK=1\\\
+        nQS21_VALUE=%\" PRIu64 \"\\n\",x);}\n  else if(id==18){unsigned char buf[16];do_read16(target,buf);printf(\"\
         QS21_READ_OK=1\\nQS21_VALUE=%u\\n\",(unsigned)buf[0]);}\n  else {unsigned char x=id==20?helper(target):do_read(target);printf(\"\
         QS21_READ_OK=1\\nQS21_VALUE=%u\\n\",(unsigned)x);}\n  fflush(stdout);return 0;\n}\nC\ncat > results/run-jump-matrix.py\
-        \ <<'PYJUMP'\nimport collections,hashlib,json,os,pathlib,re,subprocess,sys\nout=pathlib.Path('results'); logs=out/'jump-cases';logs.mkdir(exist_ok=True)\n\
-        page=os.sysconf('SC_PAGE_SIZE')\ncases={1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:2,9:3,10:4,11:8,12:16,13:32,14:64,15:1,16:1,17:1,18:1,19:1,20:1}\n\
-        # 20 geometries x 2 destination permission modes x 2 alignments x 2 optimization levels.\n# Each variant has an OS-allowed\
-        \ attempt and a strict reference-policy control.\nresults=[]\nfor opt in (0,2):\n  exe=out/f'jump-control-O{opt}'\n\
+        \ <<'PYJUMP'\nimport collections,hashlib,json,os,pathlib,re,subprocess,sys\nout=pathlib.Path('results');\
+        \ logs=out/'jump-cases';logs.mkdir(exist_ok=True)\npage=os.sysconf('SC_PAGE_SIZE')\ncases={1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:2,9:3,10:4,11:8,12:16,13:32,14:64,15:1,16:1,17:1,18:1,19:1,20:1}\n\
+        # 20 geometries x 2 destination permission modes x 2 alignments x 2 optimization levels.\n# Each variant\
+        \ has an OS-allowed attempt and a strict reference-policy control.\nresults=[]\nfor opt in (0,2):\n  exe=out/f'jump-control-O{opt}'\n\
         \  cmd=['clang-16',f'-O{opt}','-g','-fno-omit-frame-pointer','-Wall','-Wextra','-o',str(exe),str(out/'jump-control.c')]\n\
-        \  subprocess.run(cmd,check=True,stdout=(out/f'jump-compile-O{opt}.log').open('w'),stderr=subprocess.STDOUT)\n  sha=hashlib.sha256(exe.read_bytes()).hexdigest()\n\
-        \  for case,guard in cases.items():\n    for ro in (0,1):\n      for unaligned in (0,1):\n        for strict in (0,1):\n\
-        \          key=f'c{case:02d}-o{opt}-ro{ro}-ua{unaligned}-strict{strict}'\n          argv=[str(exe),str(case),str(guard),str(opt),str(ro),str(unaligned),str(strict)]\n\
-        \          try:\n            p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=10)\n\
-        \            rc,log=p.returncode,p.stdout\n          except subprocess.TimeoutExpired as e:\n            rc,log=None,(e.stdout\
-        \ or b'').decode(errors='replace') if isinstance(e.stdout,bytes) else str(e.stdout or '')\n          (logs/f'{key}.log').write_text(log)\n\
-        \          def get(name):\n            m=re.search(r'(?m)^'+re.escape(name)+r'=(.*)$',log)\n            return m.group(1).strip()\
-        \ if m else None\n          maps=[]\n          for m in re.finditer(r'(?m)^QS21_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\\
+        \  subprocess.run(cmd,check=True,stdout=(out/f'jump-compile-O{opt}.log').open('w'),stderr=subprocess.STDOUT)\n\
+        \  sha=hashlib.sha256(exe.read_bytes()).hexdigest()\n  for case,guard in cases.items():\n    for ro in (0,1):\n\
+        \      for unaligned in (0,1):\n        for strict in (0,1):\n          key=f'c{case:02d}-o{opt}-ro{ro}-ua{unaligned}-strict{strict}'\n\
+        \          argv=[str(exe),str(case),str(guard),str(opt),str(ro),str(unaligned),str(strict)]\n          try:\n\
+        \            p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=10)\n\
+        \            rc,log=p.returncode,p.stdout\n          except subprocess.TimeoutExpired as e:\n          \
+        \  rc,log=None,(e.stdout or b'').decode(errors='replace') if isinstance(e.stdout,bytes) else str(e.stdout\
+        \ or '')\n          (logs/f'{key}.log').write_text(log)\n          def get(name):\n            m=re.search(r'(?m)^'+re.escape(name)+r'=(.*)$',log)\n\
+        \            return m.group(1).strip() if m else None\n          maps=[]\n          for m in re.finditer(r'(?m)^QS21_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\\
         s+([rwxps-]{4})',log):\n            maps.append({'start':int(m.group(1),16),'end':int(m.group(2),16),'perms':m.group(3)})\n\
-        \          def address(name):\n            x=get(name)\n            return int(x,16) if x else None\n          start,end,target=address('QS21_GUARD_START'),address('QS21_GUARD_END'),address('QS21_TARGET')\n\
-        \          target_map=next((m for m in maps if target is not None and m['start']<=target<m['end']),None)\n       \
-        \   guard_covered=start is not None and end is not None and start<end and all(any(m['start']<=p and m['end']>=p+page\
-        \ and m['perms'].startswith('---') for m in maps) for p in range(start,end,page))\n          read_ok=rc==0 and bool(re.search(r'(?m)^QS21_READ_OK=1$',log))\n\
-        \          write_ok=rc==0 and bool(re.search(r'(?m)^QS21_WRITE_OK=1$',log))\n          blocked=rc==40 and bool(re.search(r'(?m)^QS21_POLICY_BLOCKED=1$',log))\n\
-        \          mapped=target_map is not None and ('w' in target_map['perms'] if case==19 else 'r' in target_map['perms'])\n\
-        \          jump=bool(guard_covered and mapped and target is not None and end<=target and (read_ok or write_ok))\n\
-        \          expected='STRICT_BLOCK' if strict else 'OS_MAPPED_ACCESS'\n          passed=bool(guard_covered and mapped\
-        \ and (blocked if strict else (write_ok if case==19 else read_ok)))\n          results.append({'id':key,'case':case,'guard_pages':guard,'optimization':opt,'read_only_destination':bool(ro),'unaligned_source':bool(unaligned),'strict_reference_policy':bool(strict),'expected':expected,'passed':passed,'exit_code':rc,'guard_interval_verified':guard_covered,'destination_permissions':target_map['perms']\
+        \          def address(name):\n            x=get(name)\n            return int(x,16) if x else None\n  \
+        \        start,end,target=address('QS21_GUARD_START'),address('QS21_GUARD_END'),address('QS21_TARGET')\n\
+        \          target_map=next((m for m in maps if target is not None and m['start']<=target<m['end']),None)\n\
+        \          guard_covered=start is not None and end is not None and start<end and all(any(m['start']<=p and\
+        \ m['end']>=p+page and m['perms'].startswith('---') for m in maps) for p in range(start,end,page))\n   \
+        \       read_ok=rc==0 and bool(re.search(r'(?m)^QS21_READ_OK=1$',log))\n          write_ok=rc==0 and bool(re.search(r'(?m)^QS21_WRITE_OK=1$',log))\n\
+        \          blocked=rc==40 and bool(re.search(r'(?m)^QS21_POLICY_BLOCKED=1$',log))\n          mapped=target_map\
+        \ is not None and ('w' in target_map['perms'] if case==19 else 'r' in target_map['perms'])\n          jump=bool(guard_covered\
+        \ and mapped and target is not None and end<=target and (read_ok or write_ok))\n          expected='STRICT_BLOCK'\
+        \ if strict else 'OS_MAPPED_ACCESS'\n          passed=bool(guard_covered and mapped and (blocked if strict\
+        \ else (write_ok if case==19 else read_ok)))\n          results.append({'id':key,'case':case,'guard_pages':guard,'optimization':opt,'read_only_destination':bool(ro),'unaligned_source':bool(unaligned),'strict_reference_policy':bool(strict),'expected':expected,'passed':passed,'exit_code':rc,'guard_interval_verified':guard_covered,'destination_permissions':target_map['perms']\
         \ if target_map else None,'destination_mapped_and_accessible':mapped,'jump_over_guard_observed':jump,'log':str(logs/f'{key}.log'),'binary_sha256':sha,'instrumentation':'UNPROTECTED_OS_CONTROL'\
         \ if not strict else 'STRICT_REFERENCE_POLICY_CONTROL_NOT_QUICKSAFE'})\nsummary={'experiment':'MAPPED_GUARD_JUMP_DIFFERENTIAL_CONTROLS_NOT_QUICKSAFE','cases':results,'case_count':len(results),'pass_count':sum(x['passed']\
         \ for x in results),'fail_count':sum(not x['passed'] for x in results),'mapped_guard_jump_observations':sum(x['jump_over_guard_observed']\
         \ for x in results),'quicksafe_access_check_verified':False,'quicksafe_bypass_confirmed':False,'limitation':'These\
-        \ explicit mmap geometries are OS and strict-policy controls. QuickSafe-specific allocation instrumentation is audited\
-        \ in separate LibCalls tests; this matrix does not establish QuickSafe enforcement of mmap-derived pointers.'}\n(out/'guard-jump-matrix.json').write_text(json.dumps(summary,indent=2))\n\
-        print('GUARD_JUMP_MATRIX_SUMMARY='+json.dumps({k:v for k,v in summary.items() if k!='cases'},indent=2),flush=True)\n\
-        if summary['fail_count']:\n  for item in results:\n    if not item['passed']:print('FAIL='+json.dumps(item),flush=True)\n\
-        \  sys.exit(1)\nPYJUMP\npython3 results/run-jump-matrix.py\n"
+        \ explicit mmap geometries are OS and strict-policy controls. QuickSafe-specific allocation instrumentation\
+        \ is audited in separate LibCalls tests; this matrix does not establish QuickSafe enforcement of mmap-derived\
+        \ pointers.'}\n(out/'guard-jump-matrix.json').write_text(json.dumps(summary,indent=2))\nprint('GUARD_JUMP_MATRIX_SUMMARY='+json.dumps({k:v\
+        \ for k,v in summary.items() if k!='cases'},indent=2),flush=True)\nif summary['fail_count']:\n  for item\
+        \ in results:\n    if not item['passed']:print('FAIL='+json.dumps(item),flush=True)\n  sys.exit(1)\nPYJUMP\n\
+        python3 results/run-jump-matrix.py\n"
       continue-on-error: true
     - name: 10e - Fifteen guard-jump write cases with parent-observed shared sentinels
       shell: bash
-      run: "set -euo pipefail\nmkdir -p results/write-jump\ncat > results/write-jump/guard_write.c <<'CWRITE'\n#define _GNU_SOURCE\n\
-        #include <sys/mman.h>\n#include <sys/wait.h>\n#include <sys/types.h>\n#include <unistd.h>\n#include <stdint.h>\n#include\
-        \ <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <signal.h>\n#include <errno.h>\n#include <inttypes.h>\n\
-        __attribute__((noinline)) static void helper(volatile unsigned char *p, size_t n, unsigned char v) {\n  for(size_t\
-        \ i=0;i<n;i++) p[i]=v;\n}\nint main(int argc,char **argv) {\n  if(argc!=4) return 90;\n  int id=atoi(argv[1]), strict=atoi(argv[2]),\
-        \ opt=atoi(argv[3]);\n  (void)opt;\n  long ps=sysconf(_SC_PAGESIZE); if(ps<=0 || id<1 || id>15) return 91;\n  size_t\
-        \ page=(size_t)ps, guards=1, landing=0, width=1;\n  switch(id) {\n    case 2:landing=16;break; case 3:landing=page-1;break;\n\
-        \    case 4:guards=2;break;case 5:guards=4;break;\n    case 6:guards=8;break;case 7:guards=16;break;case 8:guards=64;break;\n\
+      run: "set -euo pipefail\nmkdir -p results/write-jump\ncat > results/write-jump/guard_write.c <<'CWRITE'\n\
+        #define _GNU_SOURCE\n#include <sys/mman.h>\n#include <sys/wait.h>\n#include <sys/types.h>\n#include <unistd.h>\n\
+        #include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <signal.h>\n\
+        #include <errno.h>\n#include <inttypes.h>\n__attribute__((noinline)) static void helper(volatile unsigned\
+        \ char *p, size_t n, unsigned char v) {\n  for(size_t i=0;i<n;i++) p[i]=v;\n}\nint main(int argc,char **argv)\
+        \ {\n  if(argc!=4) return 90;\n  int id=atoi(argv[1]), strict=atoi(argv[2]), opt=atoi(argv[3]);\n  (void)opt;\n\
+        \  long ps=sysconf(_SC_PAGESIZE); if(ps<=0 || id<1 || id>15) return 91;\n  size_t page=(size_t)ps, guards=1,\
+        \ landing=0, width=1;\n  switch(id) {\n    case 2:landing=16;break; case 3:landing=page-1;break;\n    case\
+        \ 4:guards=2;break;case 5:guards=4;break;\n    case 6:guards=8;break;case 7:guards=16;break;case 8:guards=64;break;\n\
         \    case 9:width=8;break;case 10:width=16;break;\n    case 11:landing=1;width=8;break;case 12:landing=32;width=8;break;\n\
         \    case 13:guards=2;break;case 14:landing=64;break;\n    case 15:landing=128;break;\n  }\n  if(landing+width>page)\
         \ return 92;\n  size_t count=guards+2, len=count*page;\n  unsigned char *region=mmap(NULL,len,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);\n\
-        \  if(region==MAP_FAILED) {perror(\"mmap\");return 93;}\n  if(mprotect(region+page,guards*page,PROT_NONE)) {perror(\"\
-        mprotect\");return 94;}\n  unsigned char *dst=region+(guards+1)*page+landing;\n  memset(dst,0x31,width);\n  printf(\"\
-        CASE=%d STRICT=%d OPT=%d PAGE=%zu GUARDS=%zu WIDTH=%zu LANDING=%zu\\n\",id,strict,opt,page,guards,width,landing);\n\
-        \  printf(\"SOURCE=0x%\" PRIxPTR \" GUARD_START=0x%\" PRIxPTR \" GUARD_END=0x%\" PRIxPTR \" DEST=0x%\" PRIxPTR \"\\\
-        n\",(uintptr_t)region,(uintptr_t)(region+page),(uintptr_t)(region+(guards+1)*page),(uintptr_t)dst);\n  FILE *maps=fopen(\"\
-        /proc/self/maps\",\"r\");\n  if(maps) {char line[1024];while(fgets(line,sizeof line,maps)) fputs(line,stdout);fclose(maps);}\n\
-        \  fflush(stdout);\n  pid_t pid=fork(); if(pid<0) return 95;\n  if(pid==0) {\n    if(strict) {_exit(42);} // Reference-policy\
-        \ control, NOT QuickSafe.\n    volatile unsigned char *derived=(volatile unsigned char *)(uintptr_t)((uintptr_t)region+(guards+1)*page+landing);\n\
-        \    if(id==14) helper(derived,width,0xA7);\n    else for(size_t i=0;i<width;i++) derived[i]=0xA7;\n    _exit(0);\n\
-        \  }\n  int status=0; if(waitpid(pid,&status,0)!=pid) return 96;\n  int changed=1;for(size_t i=0;i<width;i++) if(dst[i]!=0xA7)\
-        \ changed=0;\n  int untouched=1;for(size_t i=0;i<width;i++) if(dst[i]!=0x31) untouched=0;\n  int exited=WIFEXITED(status)?WEXITSTATUS(status):-1;\n\
-        \  int signaled=WIFSIGNALED(status)?WTERMSIG(status):0;\n  printf(\"CHILD_EXIT=%d CHILD_SIGNAL=%d SENTINEL_CHANGED=%d\
-        \ SENTINEL_UNTOUCHED=%d\\n\",exited,signaled,changed,untouched);\n  int ok=strict?(exited==42 && untouched):(exited==0\
-        \ && changed);\n  printf(\"CONTROL_PASS=%d QUICKSAFE_PROTECTED=0\\n\",ok);\n  munmap(region,len);return ok?0:97;\n\
-        }\nCWRITE\npython3 - <<'PYWRITE'\nimport subprocess,hashlib,json,re,pathlib,sys\nroot=pathlib.Path('results/write-jump');src=root/'guard_write.c'\n\
-        cases=[]\nfor opt in (0,2):\n  binary=root/f'guard_write_O{opt}'\n  subprocess.run(['clang-16',f'-O{opt}','-g','-fno-omit-frame-pointer','-Wall','-Wextra',str(src),'-o',str(binary)],check=True)\n\
-        \  sha=hashlib.sha256(binary.read_bytes()).hexdigest()\n  for case in range(1,16):\n    for strict in (0,1):\n   \
-        \   proc=subprocess.run([str(binary),str(case),str(strict),str(opt)],capture_output=True,text=True,timeout=15)\n \
-        \     log=proc.stdout+proc.stderr\n      path=root/f'case-{case:02d}-O{opt}-strict{strict}.log';path.write_text(log)\n\
-        \      def value(key):\n        m=re.search(r'(?m)(?:^| )'+re.escape(key)+r'=([^ \\n]+)',log)\n        return m.group(1)\
-        \ if m else None\n      source,gs,ge,dst=[int(value(x),16) if value(x) else None for x in ('SOURCE','GUARD_START','GUARD_END','DEST')]\n\
+        \  if(region==MAP_FAILED) {perror(\"mmap\");return 93;}\n  if(mprotect(region+page,guards*page,PROT_NONE))\
+        \ {perror(\"mprotect\");return 94;}\n  unsigned char *dst=region+(guards+1)*page+landing;\n  memset(dst,0x31,width);\n\
+        \  printf(\"CASE=%d STRICT=%d OPT=%d PAGE=%zu GUARDS=%zu WIDTH=%zu LANDING=%zu\\n\",id,strict,opt,page,guards,width,landing);\n\
+        \  printf(\"SOURCE=0x%\" PRIxPTR \" GUARD_START=0x%\" PRIxPTR \" GUARD_END=0x%\" PRIxPTR \" DEST=0x%\" PRIxPTR\
+        \ \"\\n\",(uintptr_t)region,(uintptr_t)(region+page),(uintptr_t)(region+(guards+1)*page),(uintptr_t)dst);\n\
+        \  FILE *maps=fopen(\"/proc/self/maps\",\"r\");\n  if(maps) {char line[1024];while(fgets(line,sizeof line,maps))\
+        \ fputs(line,stdout);fclose(maps);}\n  fflush(stdout);\n  pid_t pid=fork(); if(pid<0) return 95;\n  if(pid==0)\
+        \ {\n    if(strict) {_exit(42);} // Reference-policy control, NOT QuickSafe.\n    volatile unsigned char\
+        \ *derived=(volatile unsigned char *)(uintptr_t)((uintptr_t)region+(guards+1)*page+landing);\n    if(id==14)\
+        \ helper(derived,width,0xA7);\n    else for(size_t i=0;i<width;i++) derived[i]=0xA7;\n    _exit(0);\n  }\n\
+        \  int status=0; if(waitpid(pid,&status,0)!=pid) return 96;\n  int changed=1;for(size_t i=0;i<width;i++)\
+        \ if(dst[i]!=0xA7) changed=0;\n  int untouched=1;for(size_t i=0;i<width;i++) if(dst[i]!=0x31) untouched=0;\n\
+        \  int exited=WIFEXITED(status)?WEXITSTATUS(status):-1;\n  int signaled=WIFSIGNALED(status)?WTERMSIG(status):0;\n\
+        \  printf(\"CHILD_EXIT=%d CHILD_SIGNAL=%d SENTINEL_CHANGED=%d SENTINEL_UNTOUCHED=%d\\n\",exited,signaled,changed,untouched);\n\
+        \  int ok=strict?(exited==42 && untouched):(exited==0 && changed);\n  printf(\"CONTROL_PASS=%d QUICKSAFE_PROTECTED=0\\\
+        n\",ok);\n  munmap(region,len);return ok?0:97;\n}\nCWRITE\npython3 - <<'PYWRITE'\nimport subprocess,hashlib,json,re,pathlib,sys\n\
+        root=pathlib.Path('results/write-jump');src=root/'guard_write.c'\ncases=[]\nfor opt in (0,2):\n  binary=root/f'guard_write_O{opt}'\n\
+        \  subprocess.run(['clang-16',f'-O{opt}','-g','-fno-omit-frame-pointer','-Wall','-Wextra',str(src),'-o',str(binary)],check=True)\n\
+        \  sha=hashlib.sha256(binary.read_bytes()).hexdigest()\n  for case in range(1,16):\n    for strict in (0,1):\n\
+        \      proc=subprocess.run([str(binary),str(case),str(strict),str(opt)],capture_output=True,text=True,timeout=15)\n\
+        \      log=proc.stdout+proc.stderr\n      path=root/f'case-{case:02d}-O{opt}-strict{strict}.log';path.write_text(log)\n\
+        \      def value(key):\n        m=re.search(r'(?m)(?:^| )'+re.escape(key)+r'=([^ \\n]+)',log)\n        return\
+        \ m.group(1) if m else None\n      source,gs,ge,dst=[int(value(x),16) if value(x) else None for x in ('SOURCE','GUARD_START','GUARD_END','DEST')]\n\
         \      maps=[]\n      for line in log.splitlines():\n        m=re.match(r'^([0-9a-f]+)-([0-9a-f]+)\\s+([rwxps-]{4})',line)\n\
         \        if m:maps.append((int(m[1],16),int(m[2],16),m[3]))\n      page=int(value('PAGE') or 0)\n      guard_valid=bool(page\
-        \ and gs is not None and ge is not None and all(any(a<=p and b>=p+page and perm.startswith('---') for a,b,perm in\
-        \ maps) for p in range(gs,ge,page)))\n      target_valid=bool(dst is not None and any(a<=dst<b and 'w' in perm for\
-        \ a,b,perm in maps))\n      geometry=bool(source is not None and gs is not None and source<gs<ge<=dst and guard_valid\
-        \ and target_valid)\n      passed=proc.returncode==0 and value('CONTROL_PASS')=='1' and geometry\n      cases.append({'case':case,'optimization':opt,'strict_reference_control':bool(strict),'passed':passed,'geometry_verified':geometry,'sentinel_changed':value('SENTINEL_CHANGED')=='1','sentinel_untouched':value('SENTINEL_UNTOUCHED')=='1','child_exit':value('CHILD_EXIT'),'child_signal':value('CHILD_SIGNAL'),'binary_sha256':sha,'log':str(path),'quicksafe_protected':False})\n\
+        \ and gs is not None and ge is not None and all(any(a<=p and b>=p+page and perm.startswith('---') for a,b,perm\
+        \ in maps) for p in range(gs,ge,page)))\n      target_valid=bool(dst is not None and any(a<=dst<b and 'w'\
+        \ in perm for a,b,perm in maps))\n      geometry=bool(source is not None and gs is not None and source<gs<ge<=dst\
+        \ and guard_valid and target_valid)\n      passed=proc.returncode==0 and value('CONTROL_PASS')=='1' and\
+        \ geometry\n      cases.append({'case':case,'optimization':opt,'strict_reference_control':bool(strict),'passed':passed,'geometry_verified':geometry,'sentinel_changed':value('SENTINEL_CHANGED')=='1','sentinel_untouched':value('SENTINEL_UNTOUCHED')=='1','child_exit':value('CHILD_EXIT'),'child_signal':value('CHILD_SIGNAL'),'binary_sha256':sha,'log':str(path),'quicksafe_protected':False})\n\
         summary={'experiment':'GUARD_JUMP_WRITE_SHARED_SENTINEL_OS_AND_REFERENCE_CONTROLS','total':len(cases),'passed':sum(x['passed']\
         \ for x in cases),'failed':sum(not x['passed'] for x in cases),'unprotected_writes_observed':sum(x['sentinel_changed']\
         \ and not x['strict_reference_control'] and x['geometry_verified'] for x in cases),'quicksafe_protected_write_cases':0,'quicksafe_write_bypass_confirmed':False,'limitations':'These\
-        \ are mmap-derived write controls, not QuickSafe-protected allocation writes. Strict policy is an artificial reference\
-        \ control. Parent checks shared sentinel after child exit. No QuickSafe write enforcement can be inferred.','cases':cases}\n\
-        (root/'summary.json').write_text(json.dumps(summary,indent=2))\nprint('WRITE_JUMP_SUMMARY='+json.dumps({k:v for k,v\
-        \ in summary.items() if k!='cases'},indent=2),flush=True)\nif summary['failed']:\n  for x in cases:\n    if not x['passed']:print('FAILED_WRITE_CONTROL='+json.dumps(x),flush=True)\n\
-        \  sys.exit(1)\nPYWRITE\n"
+        \ are mmap-derived write controls, not QuickSafe-protected allocation writes. Strict policy is an artificial\
+        \ reference control. Parent checks shared sentinel after child exit. No QuickSafe write enforcement can\
+        \ be inferred.','cases':cases}\n(root/'summary.json').write_text(json.dumps(summary,indent=2))\nprint('WRITE_JUMP_SUMMARY='+json.dumps({k:v\
+        \ for k,v in summary.items() if k!='cases'},indent=2),flush=True)\nif summary['failed']:\n  for x in cases:\n\
+        \    if not x['passed']:print('FAILED_WRITE_CONTROL='+json.dumps(x),flush=True)\n  sys.exit(1)\nPYWRITE\n"
       continue-on-error: true
     - name: 10f - Execute real QuickSafe allocation write probes with conservative evidence classification
       shell: bash
-      run: "set -euo pipefail\npython3 - <<'PYWRITEPROTECTED'\nimport hashlib,json,os,pathlib,re,subprocess,sys\nout=pathlib.Path('results');\
-        \ out.mkdir(exist_ok=True)\nbinary=pathlib.Path('QuickSafe/quicksafe/build/targets/LibCalls/bin/libcalls').resolve()\n\
+      run: "set -euo pipefail\npython3 - <<'PYWRITEPROTECTED'\nimport hashlib,json,os,pathlib,re,subprocess,sys\n\
+        out=pathlib.Path('results'); out.mkdir(exist_ok=True)\nbinary=pathlib.Path('QuickSafe/quicksafe/build/targets/LibCalls/bin/libcalls').resolve()\n\
         provenance=json.loads((out/'verified-binary-provenance.json').read_text())\ndigest=hashlib.sha256(binary.read_bytes()).hexdigest()\n\
-        if digest!=provenance['sha256_after_instrumented_rebuild']:\n    raise SystemExit('FAIL CLOSED: instrumented binary\
-        \ provenance mismatch')\nif b'QS_WRITE_BEGIN' not in binary.read_bytes():\n    raise SystemExit('FAIL CLOSED: write\
-        \ fixture absent from actual instrumented binary')\npg=os.sysconf('SC_PAGE_SIZE')\nlib=pathlib.Path('QuickSafe/quicksafe/build/packages/QuickSafePass/install/lib').resolve()\n\
+        if digest!=provenance['sha256_after_instrumented_rebuild']:\n    raise SystemExit('FAIL CLOSED: instrumented\
+        \ binary provenance mismatch')\nif b'QS_WRITE_BEGIN' not in binary.read_bytes():\n    raise SystemExit('FAIL\
+        \ CLOSED: write fixture absent from actual instrumented binary')\npg=os.sysconf('SC_PAGE_SIZE')\nlib=pathlib.Path('QuickSafe/quicksafe/build/packages/QuickSafePass/install/lib').resolve()\n\
         backtrace=pathlib.Path('QuickSafe/quicksafe/build/packages/libbacktrace/install/lib').resolve()\nenv=os.environ.copy()\n\
         env['LD_LIBRARY_PATH']=':'.join([str(lib),str(backtrace),'/usr/lib/llvm-16/lib',env.get('LD_LIBRARY_PATH','')])\n\
         env['QS_V23_WRITE_OFFSET']='1'\noffsets={0,1,7,15,31,63,64,65,127,255,511,1023,pg-1,pg,pg+1,pg+16,2*pg,2*pg+64,3*pg,4*pg,8*pg,16*pg,32*pg,64*pg}\n\
-        for boundary in (pg,2*pg,4*pg,8*pg,16*pg,32*pg,64*pg):\n    for delta in (-2,-1,0,1,2,16,64):\n        if boundary+delta>=0:offsets.add(boundary+delta)\n\
-        def marker(log,key):return bool(re.search(r'(?m)^'+re.escape(key)+r'=1$',log))\ndef number(log,key):\n    m=re.search(r'(?m)^'+re.escape(key)+r'=0x([0-9a-fA-F]+)$',log)\n\
-        \    return int(m[1],16) if m else None\nrows=[]\nfor offset in sorted(offsets):\n    env['QS_V17_OFFSET']=str(offset)\n\
-        \    try:\n        proc=subprocess.run([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=20)\n\
+        for boundary in (pg,2*pg,4*pg,8*pg,16*pg,32*pg,64*pg):\n    for delta in (-2,-1,0,1,2,16,64):\n        if\
+        \ boundary+delta>=0:offsets.add(boundary+delta)\ndef marker(log,key):return bool(re.search(r'(?m)^'+re.escape(key)+r'=1$',log))\n\
+        def number(log,key):\n    m=re.search(r'(?m)^'+re.escape(key)+r'=0x([0-9a-fA-F]+)$',log)\n    return int(m[1],16)\
+        \ if m else None\nrows=[]\nfor offset in sorted(offsets):\n    env['QS_V17_OFFSET']=str(offset)\n    try:\n\
+        \        proc=subprocess.run([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=20)\n\
         \        rc,log=proc.returncode,proc.stdout\n    except subprocess.TimeoutExpired as e:\n        rc,log=None,str(e.stdout\
-        \ or '')+'\\nTIMEOUT'\n    logpath=out/f'protected-write-offset-{offset}.log';logpath.write_text(log)\n    base=number(log,'QS_BASE');dst=number(log,'QS_ADDR')\n\
-        \    maps=[]\n    for m in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\s+([rwxps-]{4})(?:\\s|$)',log):\n\
-        \        maps.append({'start':int(m[1],16),'end':int(m[2],16),'perms':m[3]})\n    srcmap=next((m for m in maps if\
-        \ base is not None and m['start']<=base<m['end']),None)\n    dstmap=next((m for m in maps if dst is not None and m['start']<=dst<m['end']),None)\n\
-        \    guards=[m for m in maps if base is not None and dst is not None and base<m['start'] and m['end']<=dst and m['perms'].startswith('---')]\n\
+        \ or '')+'\\nTIMEOUT'\n    logpath=out/f'protected-write-offset-{offset}.log';logpath.write_text(log)\n\
+        \    base=number(log,'QS_BASE');dst=number(log,'QS_ADDR')\n    maps=[]\n    for m in re.finditer(r'(?m)^QS_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\\\
+        s+([rwxps-]{4})(?:\\s|$)',log):\n        maps.append({'start':int(m[1],16),'end':int(m[2],16),'perms':m[3]})\n\
+        \    srcmap=next((m for m in maps if base is not None and m['start']<=base<m['end']),None)\n    dstmap=next((m\
+        \ for m in maps if dst is not None and m['start']<=dst<m['end']),None)\n    guards=[m for m in maps if base\
+        \ is not None and dst is not None and base<m['start'] and m['end']<=dst and m['perms'].startswith('---')]\n\
         \    # Success requires process exit zero, exact marker, and independently printed readback.\n    readback=re.search(r'(?m)^QS_WRITE_READBACK=(\\\
         d+)$',log)\n    completed=rc==0 and marker(log,'QS_WRITE_OK') and readback is not None and int(readback[1])==0xA7\n\
         \    verified_geometry=bool(srcmap and dstmap and guards and 'w' in dstmap['perms'] and base<guards[0]['start']<guards[0]['end']<=dst)\n\
-        \    rows.append({'offset':offset,'exit_code':rc,'write_started':marker(log,'QS_WRITE_BEGIN'),\n                 'write_completed_and_readback_verified':completed,'source_address':base,'destination_address':dst,\n\
-        \                 'source_mapping':srcmap,'destination_mapping':dstmap,'intervening_guard_mappings':guards,\n    \
-        \             'guard_interval_skip_write_observed':completed and verified_geometry,\n                 'runtime_access_check_verified':False,'log':str(logpath),\n\
-        \                 'classification':'WRITE_SUCCEEDED' if completed else ('TIMEOUT' if rc is None else ('FAULT' if rc\
-        \ in (-11,-7,123) else 'OTHER_EXIT'))})\n    print('PROTECTED_WRITE='+json.dumps({k:v for k,v in rows[-1].items()\
-        \ if k not in ('source_mapping','destination_mapping','intervening_guard_mappings')}),flush=True)\nbaseline=next((r\
-        \ for r in rows if r['offset']==0),None)\nreport={'experiment':'REAL_QUICKSAFE_TARGETED_ALLOCATION_WRITE_PROBE',\n\
+        \    rows.append({'offset':offset,'exit_code':rc,'write_started':marker(log,'QS_WRITE_BEGIN'),\n       \
+        \          'write_completed_and_readback_verified':completed,'source_address':base,'destination_address':dst,\n\
+        \                 'source_mapping':srcmap,'destination_mapping':dstmap,'intervening_guard_mappings':guards,\n\
+        \                 'guard_interval_skip_write_observed':completed and verified_geometry,\n              \
+        \   'runtime_access_check_verified':False,'log':str(logpath),\n                 'classification':'WRITE_SUCCEEDED'\
+        \ if completed else ('TIMEOUT' if rc is None else ('FAULT' if rc in (-11,-7,123) else 'OTHER_EXIT'))})\n\
+        \    print('PROTECTED_WRITE='+json.dumps({k:v for k,v in rows[-1].items() if k not in ('source_mapping','destination_mapping','intervening_guard_mappings')}),flush=True)\n\
+        baseline=next((r for r in rows if r['offset']==0),None)\nreport={'experiment':'REAL_QUICKSAFE_TARGETED_ALLOCATION_WRITE_PROBE',\n\
         \        'binary_sha256':digest,'selector':provenance['selector'],'cases':rows,\n        'case_count':len(rows),'baseline_write_verified':bool(baseline\
         \ and baseline['write_completed_and_readback_verified']),\n        'successful_writes':sum(r['write_completed_and_readback_verified']\
         \ for r in rows),\n        'faults':sum(r['classification']=='FAULT' for r in rows),\n        'verified_guard_interval_skip_writes':sum(r['guard_interval_skip_write_observed']\
         \ for r in rows),\n        'memory_access_enforcement_verified':False,'quicksafe_write_bypass_confirmed':False,\n\
-        \        'limitations':'Real instrumented LibCalls allocation and dereference, but no proof that QuickSafe instruments/enforces\
-        \ each write access. Destination mappings are incidental and may be absent. Guard skip alone does not prove violation\
-        \ of QuickSafe security policy.'}\n(out/'protected-write-experiment.json').write_text(json.dumps(report,indent=2))\n\
+        \        'limitations':'Real instrumented LibCalls allocation and dereference, but no proof that QuickSafe\
+        \ instruments/enforces each write access. Destination mappings are incidental and may be absent. Guard skip\
+        \ alone does not prove violation of QuickSafe security policy.'}\n(out/'protected-write-experiment.json').write_text(json.dumps(report,indent=2))\n\
         print('PROTECTED_WRITE_SUMMARY='+json.dumps({k:v for k,v in report.items() if k!='cases'},indent=2),flush=True)\n\
-        if not report['baseline_write_verified']:raise SystemExit('FAIL CLOSED: protected in-bounds write/readback baseline\
-        \ failed')\nif any(r['guard_interval_skip_write_observed'] and not r['write_completed_and_readback_verified'] for\
-        \ r in rows):\n    raise SystemExit('FAIL CLOSED: invalid guard-skip classification')\nPYWRITEPROTECTED\n"
+        if not report['baseline_write_verified']:raise SystemExit('FAIL CLOSED: protected in-bounds write/readback\
+        \ baseline failed')\nif any(r['guard_interval_skip_write_observed'] and not r['write_completed_and_readback_verified']\
+        \ for r in rows):\n    raise SystemExit('FAIL CLOSED: invalid guard-skip classification')\nPYWRITEPROTECTED\n"
       continue-on-error: true
     - name: 11 - Publish unambiguous verdict
       if: always()
       shell: bash
       run: "python3 - <<'PY'\nimport json\nimport os\nfrom pathlib import Path\nout = Path('results')\ndef exit_code(name):\n\
         \    p = out / name\n    return int(p.read_text().strip()) if p.exists() else None\np = out / 'guard-summary.json'\n\
-        control = json.loads(p.read_text()) if p.exists() else {}\ndef health(name, field):\n    p = out / name\n    return\
-        \ json.loads(p.read_text()).get(field, False) if p.exists() else False\naudit_path=out/'instrumentation-audit.json'\n\
+        control = json.loads(p.read_text()) if p.exists() else {}\ndef health(name, field):\n    p = out / name\n\
+        \    return json.loads(p.read_text()).get(field, False) if p.exists() else False\naudit_path=out/'instrumentation-audit.json'\n\
         audit=json.loads(audit_path.read_text()) if audit_path.exists() else {}\nprotected_path=out/'protected-runtime-experiment.json'\n\
         protected=json.loads(protected_path.read_text()) if protected_path.exists() else {}\njump_path=out/'guard-jump-matrix.json'\n\
         jump=json.loads(jump_path.read_text()) if jump_path.exists() else {}\nwrite_path=out/'write-jump'/'summary.json'\n\
         writes=json.loads(write_path.read_text()) if write_path.exists() else {}\nprotected_writes_path=out/'protected-write-experiment.json'\n\
-        protected_writes=json.loads(protected_writes_path.read_text()) if protected_writes_path.exists() else {}\nreport =\
-        \ {\n    'actual_quicksafe_protected_write_cases': protected_writes.get('case_count',0),\n    'actual_quicksafe_protected_writes_completed':\
+        protected_writes=json.loads(protected_writes_path.read_text()) if protected_writes_path.exists() else {}\n\
+        report = {\n    'actual_quicksafe_protected_write_cases': protected_writes.get('case_count',0),\n    'actual_quicksafe_protected_writes_completed':\
         \ protected_writes.get('successful_writes',0),\n    'actual_quicksafe_protected_write_guard_skips': protected_writes.get('verified_guard_interval_skip_writes',0),\n\
         \    'actual_quicksafe_protected_write_baseline_verified': protected_writes.get('baseline_write_verified',False),\n\
         \    'actual_quicksafe_write_access_enforcement_verified': False,\n    'write_jump_control_cases': writes.get('total'),\n\
         \    'write_jump_control_passes': writes.get('passed'),\n    'write_jump_control_failures': writes.get('failed'),\n\
         \    'unprotected_guard_jump_writes_observed': writes.get('unprotected_writes_observed'),\n    'quicksafe_protected_write_cases':\
-        \ writes.get('quicksafe_protected_write_cases',0),\n    'quicksafe_write_bypass_confirmed': False,\n    'mapped_jump_control_cases':\
-        \ jump.get('case_count'),\n    'mapped_jump_control_passes': jump.get('pass_count'),\n    'mapped_jump_control_failures':\
-        \ jump.get('fail_count'),\n    'mapped_jump_observations_unprotected_only': jump.get('mapped_guard_jump_observations'),\n\
-        \    'mapped_jump_matrix_is_quicksafe_bypass_evidence': False,\n    'verified_selector': audit.get('target_selector'),\n\
-        \    'verified_binary_sha256': audit.get('final_binary_sha256'),\n    'control_passed': control.get('passed') == 6\
-        \ and control.get('failed') == 0,\n    'official_quicksafe_build_exit': exit_code('quicksafe-build.exit'),\n    'official_quicksafe_build_verified':\
-        \ health('quicksafe-build-health.json', 'build_healthy') and health('quicksafe-artifacts.json', 'pass_verified') and\
-        \ health('quicksafe-artifacts.json', 'target_files_present'),\n    'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),\n\
-        \    'official_quicksafe_run_verified': health('quicksafe-run-health.json', 'run_healthy'),\n    'instrumentation_preconditions_met':\
-        \ health('instrumentation-audit.json', 'instrumentation_preconditions_met'),\n    'targeted_allocation_instrumented':\
-        \ health('instrumentation-audit.json', 'targeted_allocation_instrumented'),\n    'binary_matches_instrumented_rebuild':\
-        \ health('instrumentation-audit.json', 'binary_matches_instrumented_rebuild'),\n    'memory_access_instrumentation_behavior_verified':\
-        \ False, # Allocation instrumentation and OS page faults do not establish access-check instrumentation.\n    'protected_runtime_experiment_executed':\
+        \ writes.get('quicksafe_protected_write_cases',0),\n    'quicksafe_write_bypass_confirmed': False,\n   \
+        \ 'mapped_jump_control_cases': jump.get('case_count'),\n    'mapped_jump_control_passes': jump.get('pass_count'),\n\
+        \    'mapped_jump_control_failures': jump.get('fail_count'),\n    'mapped_jump_observations_unprotected_only':\
+        \ jump.get('mapped_guard_jump_observations'),\n    'mapped_jump_matrix_is_quicksafe_bypass_evidence': False,\n\
+        \    'verified_selector': audit.get('target_selector'),\n    'verified_binary_sha256': audit.get('final_binary_sha256'),\n\
+        \    'control_passed': control.get('passed') == 6 and control.get('failed') == 0,\n    'official_quicksafe_build_exit':\
+        \ exit_code('quicksafe-build.exit'),\n    'official_quicksafe_build_verified': health('quicksafe-build-health.json',\
+        \ 'build_healthy') and health('quicksafe-artifacts.json', 'pass_verified') and health('quicksafe-artifacts.json',\
+        \ 'target_files_present'),\n    'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),\n    'official_quicksafe_run_verified':\
+        \ health('quicksafe-run-health.json', 'run_healthy'),\n    'instrumentation_preconditions_met': health('instrumentation-audit.json',\
+        \ 'instrumentation_preconditions_met'),\n    'targeted_allocation_instrumented': health('instrumentation-audit.json',\
+        \ 'targeted_allocation_instrumented'),\n    'binary_matches_instrumented_rebuild': health('instrumentation-audit.json',\
+        \ 'binary_matches_instrumented_rebuild'),\n    'memory_access_instrumentation_behavior_verified': False,\
+        \ # Allocation instrumentation and OS page faults do not establish access-check instrumentation.\n    'protected_runtime_experiment_executed':\
         \ bool(protected.get('cases')),\n    'guard_mapping_observed': bool(protected.get('guard_mapping_observed_at_base_plus_page')),\n\
         \    'quicksafe_guard_bypass_tested': bool(protected.get('cases')) and bool(protected.get('guard_mapping_observed_at_base_plus_page')),\n\
-        \    'per_process_guard_interval_skip_count': protected.get('per_process_guard_interval_skip_count'),\n    'per_process_guard_interval_skip_offsets':\
-        \ protected.get('per_process_guard_interval_skip_offsets'),\n    'protected_case_outcomes': protected.get('counts_by_outcome',\
-        \ {}),\n    'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),\n    'object_out_of_bounds_reads_completed':\
-        \ protected.get('object_out_of_bounds_reads_completed'),\n    'quicksafe_vulnerability_confirmed': False, # Requires\
-        \ independent enforcement/policy verification beyond address-space evidence.\n    'note': 'v23 adds actual targeted-allocation\
-        \ write probes, but write-access enforcement is not independently established. Nonzero allocation instrumentation\
-        \ and binary hash provenance do not establish guard-page enforcement. The six GDB controls are unprotected; protected\
-        \ runtime probe outcomes must be evaluated against the observed memory map.'\n}\n(out / 'final-verdict.json').write_text(json.dumps(report,\
-        \ indent=2))\nprint(json.dumps(report, indent=2))\nwith open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:\n    f.write('#\
-        \ QuickSafe research\\n\\n')\n    for key, value in report.items():\n        f.write(f'- **{key}:** {value}\\n')\n\
-        PY\n"
+        \    'per_process_guard_interval_skip_count': protected.get('per_process_guard_interval_skip_count'),\n\
+        \    'per_process_guard_interval_skip_offsets': protected.get('per_process_guard_interval_skip_offsets'),\n\
+        \    'protected_case_outcomes': protected.get('counts_by_outcome', {}),\n    'guard_mapping_faults': protected.get('faults_on_inaccessible_mapping'),\n\
+        \    'object_out_of_bounds_reads_completed': protected.get('object_out_of_bounds_reads_completed'),\n  \
+        \  'quicksafe_vulnerability_confirmed': False, # Requires independent enforcement/policy verification beyond\
+        \ address-space evidence.\n    'note': 'v25 includes actual targeted-allocation write probes, but write-access\
+        \ enforcement is not independently established. Nonzero allocation instrumentation and binary hash provenance\
+        \ do not establish guard-page enforcement. The six GDB controls are unprotected; protected runtime probe\
+        \ outcomes must be evaluated against the observed memory map.'\n}\n# The final CI gate and the verdict producer\
+        \ share this explicit schema.\nrequired_files = {\n    'guard_controls': out/'guard-summary.json',\n   \
+        \ 'instrumentation_audit': out/'instrumentation-audit.json',\n    'protected_reads': out/'protected-runtime-experiment.json',\n\
+        \    'protected_writes': out/'protected-write-experiment.json',\n    'mapped_controls': out/'guard-jump-matrix.json',\n\
+        \    'write_controls': out/'write-jump'/'summary.json',\n    'binary_provenance': out/'verified-binary-provenance.json',\n\
+        }\nmissing = [str(path) for path in required_files.values() if not path.is_file()]\nrequirements = {\n \
+        \   'official_build': report['official_quicksafe_build_verified'],\n    'official_run': report['official_quicksafe_run_verified'],\n\
+        \    'instrumented_allocation': report['instrumentation_preconditions_met'] and report['targeted_allocation_instrumented'],\n\
+        \    'binary_provenance': report['binary_matches_instrumented_rebuild'] and bool(report['verified_binary_sha256']),\n\
+        \    'read_experiment': bool(protected.get('cases')) and bool(protected.get('guard_mapping_observed_at_base_plus_page')),\n\
+        \    'write_experiment': protected_writes.get('case_count',0)>0 and bool(protected_writes.get('cases')),\n\
+        \    'protected_write_baseline': protected_writes.get('baseline_write_verified',False),\n    'guard_controls':\
+        \ report['control_passed'],\n    'mapped_controls': jump.get('case_count',0)>0 and jump.get('fail_count',1)==0,\n\
+        \    'write_controls': writes.get('total',0)>0 and writes.get('failed',1)==0,\n}\nmissing += ['requirement:'+key\
+        \ for key,ok in requirements.items() if not ok]\n# Check structural and accounting consistency, not just\
+        \ presence of files.\nread_cases=protected.get('cases', [])\nwrite_cases=protected_writes.get('cases', [])\n\
+        if not isinstance(read_cases,list) or protected.get('case_count') != len(read_cases):\n    missing.append('inconsistent:protected_read_case_count')\n\
+        if not isinstance(write_cases,list) or protected_writes.get('case_count') != len(write_cases):\n    missing.append('inconsistent:protected_write_case_count')\n\
+        if sum(protected.get('counts_by_outcome',{}).values()) != len(read_cases):\n    missing.append('inconsistent:protected_read_outcome_counts')\n\
+        if protected_writes.get('successful_writes',0)+protected_writes.get('faults',0) != len(write_cases):\n \
+        \   missing.append('inconsistent:protected_write_outcome_counts')\nif protected_writes.get('verified_guard_interval_skip_writes',0)\
+        \ > protected_writes.get('successful_writes',0):\n    missing.append('inconsistent:protected_write_guard_skip_count')\n\
+        if protected.get('per_process_guard_interval_skip_count',0) > len(read_cases):\n    missing.append('inconsistent:protected_read_guard_skip_count')\n\
+        if jump.get('pass_count',0)+jump.get('fail_count',0) != jump.get('case_count',-1):\n    missing.append('inconsistent:mapped_control_case_count')\n\
+        if writes.get('passed',0)+writes.get('failed',0) != writes.get('total',-1):\n    missing.append('inconsistent:write_control_case_count')\n\
+        if protected_writes.get('memory_access_enforcement_verified') is True:\n    # Preserve the source's claim\
+        \ for manual inspection; do not infer it from allocation instrumentation.\n    report['write_enforcement_claim_requires_independent_review']\
+        \ = True\n\nreport['evidence_schema_version'] = 1\nreport['evidence_requirements'] = requirements\nreport['missing_evidence']\
+        \ = missing\nreport['execution_complete'] = not missing\nreport['result_status'] = 'COMPLETE_NO_BYPASS_CONFIRMED'\
+        \ if not missing else 'INCOMPLETE_NOT_A_SECURITY_VERDICT'\nreport['protected_write_case_count'] = protected_writes.get('case_count',0)\n\
+        report['protected_write_faults'] = protected_writes.get('faults',0)\nreport['protected_write_successes']\
+        \ = protected_writes.get('successful_writes',0)\nreport['protected_write_guard_skips'] = protected_writes.get('verified_guard_interval_skip_writes',0)\n\
+        report['security_assessment_limitations'] = ['Memory-access enforcement has not been independently verified;\
+        \ completed out-of-bounds operations alone do not establish a QuickSafe bypass.']\n(out / 'final-verdict.json').write_text(json.dumps(report,\
+        \ indent=2))\nprint(json.dumps(report, indent=2))\nwith open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as\
+        \ f:\n    f.write('# QuickSafe research\\n\\n')\n    for key, value in report.items():\n        f.write(f'-\
+        \ **{key}:** {value}\\n')\nPY\n"
     - name: 12 - Upload diagnostic artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v24
+        name: quicksafe-ultraverbose-v25
         path: 'results/
 
           guard_control.c
@@ -702,12 +783,25 @@ jobs:
           '
         if-no-files-found: warn
         retention-days: 14
-    - name: 13 - Report incomplete evidence and fail CI after artifact upload
+    - name: 13 - Validate explicit evidence schema after artifact upload
       if: always()
       shell: bash
-      run: "set -euo pipefail\npython3 - <<'PYFINAL'\nimport json,pathlib,sys\nout=pathlib.Path('results')\nverdict=out/'final-verdict.json'\n\
-        if not verdict.is_file():\n    print('CI_EVIDENCE_FAILURE: final-verdict.json missing',flush=True)\n    sys.exit(1)\n\
-        r=json.loads(verdict.read_text())\nprint('CI_EVIDENCE_STATUS='+json.dumps({'status':r.get('result_status'), 'missing':r.get('missing_evidence')},indent=2),flush=True)\n\
-        if not r.get('execution_complete'):\n    sys.exit('CI_EVIDENCE_FAILURE: required experiments missing; artifacts were\
-        \ uploaded before this check')\nif not r.get('instrumentation_preconditions_met') or not r.get('actual_quicksafe_protected_write_baseline_verified'):\n\
-        \    sys.exit('CI_EVIDENCE_FAILURE: instrumentation or protected write baseline not verified')\nPYFINAL"
+      run: "set -euo pipefail\npython3 - <<'PYFINAL'\nimport json, pathlib, sys\nout=pathlib.Path('results')\npath=out/'final-verdict.json'\n\
+        if not path.is_file():\n    sys.exit('CI_EVIDENCE_FAILURE: results/final-verdict.json missing')\ntry:\n\
+        \    r=json.loads(path.read_text())\nexcept (ValueError,OSError) as exc:\n    sys.exit(f'CI_EVIDENCE_FAILURE:\
+        \ verdict invalid: {exc}')\nrequired=('evidence_schema_version','execution_complete','result_status','missing_evidence','evidence_requirements')\n\
+        missing_keys=[key for key in required if key not in r]\nif missing_keys:\n    sys.exit('CI_EVIDENCE_FAILURE:\
+        \ verdict schema keys missing: '+', '.join(missing_keys))\nif not isinstance(r['missing_evidence'],list)\
+        \ or not isinstance(r['evidence_requirements'],dict):\n    sys.exit('CI_EVIDENCE_FAILURE: malformed evidence\
+        \ schema')\nprint('CI_EVIDENCE_STATUS='+json.dumps({\n    'status':r['result_status'],\n    'execution_complete':r['execution_complete'],\n\
+        \    'missing':r['missing_evidence'],\n    'requirements':r['evidence_requirements'],\n    'protected_write_cases':r.get('protected_write_case_count'),\n\
+        \    'protected_write_successes':r.get('protected_write_successes'),\n    'protected_write_faults':r.get('protected_write_faults'),\n\
+        \    'protected_write_guard_skips':r.get('protected_write_guard_skips'),\n    'memory_access_enforcement_verified':r.get('memory_access_instrumentation_behavior_verified'),\n\
+        },indent=2),flush=True)\nif r['result_status'] not in ('COMPLETE_NO_BYPASS_CONFIRMED','INCOMPLETE_NOT_A_SECURITY_VERDICT'):\n\
+        \    sys.exit('CI_EVIDENCE_FAILURE: unknown result status')\nif type(r['execution_complete']) is not bool:\n\
+        \    sys.exit('CI_EVIDENCE_FAILURE: execution_complete must be boolean')\nif any(type(v) is not bool for\
+        \ v in r['evidence_requirements'].values()):\n    sys.exit('CI_EVIDENCE_FAILURE: evidence requirements must\
+        \ be booleans')\nif not r['execution_complete'] or r['missing_evidence']:\n    sys.exit('CI_EVIDENCE_FAILURE:\
+        \ '+', '.join(r['missing_evidence']))\nif not r.get('instrumentation_preconditions_met') or not r.get('actual_quicksafe_protected_write_baseline_verified'):\n\
+        \    sys.exit('CI_EVIDENCE_FAILURE: instrumentation or protected write baseline not verified')\nprint('CI_EVIDENCE_GATE=PASS;\
+        \ security bypass remains unconfirmed unless separately established')\nPYFINAL"
