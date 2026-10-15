@@ -1551,7 +1551,7 @@ jobs:
          found=[k for k,pat in patterns.items() if re.search(pat,text,re.I)]
          if found:source_matches.append({'path':str(p),'markers':found})
         reads=read.get('cases',[]);writes=write.get('cases',[])
-        if not isinstance(reads,list) or not isinstance(writes,list):raise SystemExit('V27: malformed case lists')
+        if not isinstance(reads,list) or not isinstance(writes,list):raise SystemExit('V32: malformed case lists')
         read_skips=[x for x in reads if x.get('guard_interval_skipped_by_completed_read')]
         write_skips=[x for x in writes if x.get('guard_interval_skip_write_observed')]
         read_faults=sum(x.get('classification')=='FAULT' for x in reads)
@@ -1580,8 +1580,8 @@ jobs:
          'limitations':['Source/IR marker presence is not runtime proof','PROT_NONE faults may be operating-system faults','Successful out-of-bounds operations are not automatically QuickSafe bypasses']
         }
         (out/'v32-security-readiness.json').write_text(json.dumps(report,indent=2))
-        print('V31_SECURITY_READINESS='+json.dumps({k:v for k,v in report.items() if k!='source_marker_matches'},indent=2),flush=True)
-        if not report['experimental_evidence_complete']:raise SystemExit('V29_EVIDENCE_FAILURE: incomplete experiment/provenance evidence')
+        print('V32_SECURITY_READINESS='+json.dumps({k:v for k,v in report.items() if k!='source_marker_matches'},indent=2),flush=True)
+        if not report['experimental_evidence_complete']:raise SystemExit('V32_EVIDENCE_FAILURE: incomplete experiment/provenance evidence')
         PYV27
     - name: 11 - Publish unambiguous verdict
       if: always()
@@ -1705,12 +1705,12 @@ jobs:
         report['actual_quicksafe_write_access_enforcement_verified']=bool(enforcement.get('memory_access_enforcement_verified',False))
         requirements['v26_enforcement_evidence_report']=bool(enforcement) and not enforcement.get('evidence_errors') and enforcement.get('binary_sha256_matches_verified_rebuild',False)
 
-        v27_path=out/'v31-security-readiness.json'
-        v27=json.loads(v27_path.read_text()) if v27_path.is_file() else {}
-        requirements['v29_security_readiness_report']=bool(v27) and v27.get('experimental_evidence_complete') is True
-        report['v29_security_readiness']=v27.get('security_result','MISSING')
-        report['security_validation_complete']=v27.get('security_validation_complete') is True
-        report['security_validation_missing_evidence']=v27.get('missing_security_evidence',[])
+        readiness_path=out/'v32-security-readiness.json'
+        readiness=json.loads(readiness_path.read_text()) if readiness_path.is_file() else {}
+        requirements['v32_security_readiness_report']=bool(readiness) and readiness.get('experimental_evidence_complete') is True
+        report['v32_security_readiness']=readiness.get('security_result','MISSING')
+        report['security_validation_complete']=readiness.get('security_validation_complete') is True
+        report['security_validation_missing_evidence']=readiness.get('missing_security_evidence',[])
         report['security_assessment_status']='COMPLETE' if report['security_validation_complete'] else 'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED'
 
         missing += ['requirement:'+k for k,v in requirements.items() if not v]
@@ -1720,9 +1720,9 @@ jobs:
         report['missing_evidence'] = missing
         report['execution_complete'] = not missing
         report['result_status'] = ('INCOMPLETE_EVIDENCE' if missing else ('NO_CONFIRMED_BYPASS_IN_TESTED_CASES' if report['security_validation_complete'] and not (report.get('actual_quicksafe_protected_write_guard_skips',0) or protected.get('per_process_guard_interval_skip_count',0)) else ('GUARD_SKIP_REQUIRES_POLICY_REVIEW' if report['security_validation_complete'] else 'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED')))
-        report['security_validation_missing_evidence']=v27.get('missing_security_evidence',[])
+        report['security_validation_missing_evidence']=readiness.get('missing_security_evidence',[])
         report['experiment_execution_complete']=report['execution_complete']
-        report['security_validation_complete']=bool(v27.get('security_validation_complete') is True)
+        report['security_validation_complete']=bool(readiness.get('security_validation_complete') is True)
         report['quicksafe_vulnerability_confirmed']=False
         report['protected_write_case_count'] = protected_writes.get('case_count',0)
         report['protected_write_faults'] = protected_writes.get('faults',0)
@@ -1745,12 +1745,12 @@ jobs:
         import json, pathlib, os
         out=pathlib.Path('results')
         v=json.loads((out/'final-verdict.json').read_text())
-        s=json.loads((out/'v31-security-readiness.json').read_text())
+        s=json.loads((out/'v32-security-readiness.json').read_text())
         profile_log=(out/'quicksafe-run.log')
         profile_text=profile_log.read_text(errors='replace') if profile_log.exists() else ''
         profile_missing=('No raw profiling data found' in profile_text or 'Found 0 raw profiling data files' in profile_text)
         report={
-         'workflow_revision':'v30-security-gate',
+         'workflow_revision':'v32-mechanism-attribution',
          'execution_complete':v.get('execution_complete'),
          'result_status':v.get('result_status'),
          'security_validation_complete':s.get('security_validation_complete'),
@@ -1764,8 +1764,8 @@ jobs:
          'profiling_data_not_found_in_run_log':profile_missing,
          'profiling_note':'Profiling files are not required to show that the official LibCalls process exited 0; absence cannot prove enforcement.'
         }
-        (out/'v31-run-summary.json').write_text(json.dumps(report,indent=2)+'\n')
-        lines=['## QuickSafe v29: execution versus security', '',
+        (out/'v32-run-summary.json').write_text(json.dumps(report,indent=2)+'\n')
+        lines=['## QuickSafe v32: execution versus security', '',
          '| Check | Result |','|---|---|',
          f"| Experiment execution complete | {report['execution_complete']} |",
          f"| Security validation complete | {report['security_validation_complete']} |",
@@ -1799,7 +1799,7 @@ jobs:
         import json, pathlib
         out=pathlib.Path('results')
         r=json.loads((out/'final-verdict.json').read_text())
-        s=json.loads((out/'v31-security-readiness.json').read_text())
+        s=json.loads((out/'v32-security-readiness.json').read_text())
         def gate(verdict, readiness, strict):
             if verdict.get('execution_complete') is not True or verdict.get('missing_evidence'):
                 return False
@@ -1815,9 +1815,9 @@ jobs:
         assert not gate({**r,'execution_complete':False},s,False), 'Missing evidence was accepted'
         assert not gate({**r,'result_status':'NO_CONFIRMED_BYPASS_IN_TESTED_CASES'},s,False), 'Contradictory verdict was accepted'
         assert not gate({**r,'security_validation_complete':True},s,False), 'Inconsistent security flags were accepted'
-        report={'revision':'v30-security-gate','diagnostic_gate_pass':True,'strict_security_gate_pass':False,'strict_security_gate_self_test_pass':True,'status':'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED','note':'No real paired QuickSafe-on/off enforcement control exists; strict gate must reject this evidence.'}
-        (out/'v30-gate-self-test.json').write_text(json.dumps(report,indent=2)+'\n')
-        print('V30_SECURITY_GATE_SELF_TEST='+json.dumps(report,indent=2))
+        report={'revision':'v32-mechanism-attribution','diagnostic_gate_pass':True,'strict_security_gate_pass':False,'strict_security_gate_self_test_pass':True,'status':'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED','note':'A paired QuickSafe-on/off comparison exists, but a causally attributed enforcement-positive control remains unverified; strict gate must reject this evidence.'}
+        (out/'v32-gate-self-test.json').write_text(json.dumps(report,indent=2)+'\n')
+        print('V32_SECURITY_GATE_SELF_TEST='+json.dumps(report,indent=2))
         PYGATE
     - name: 12 - Upload diagnostic artifacts
       if: always()
