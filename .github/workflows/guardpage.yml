@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose v14 - Target Selection and Fail Closed Audit
+name: QuickSafe Ultra Verbose v15 - Verified Allocation Instrumentation
 
 on:
   push:
@@ -545,6 +545,67 @@ jobs:
           PYBUILD
           echo 'QUICKSAFE_BUILD_VERIFIED=PASS'
 
+      - name: '08b - Rebuild real compiled allocation with verified selector (fail closed)'
+        if: steps.quicksafe_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd QuickSafe/quicksafe
+          python3 - <<'PYSELECT'
+          import json, pathlib, re
+          src=pathlib.Path('build/targets/LibCalls/src/libcalls.cpp')
+          if not src.exists(): raise SystemExit('Compiled C++ source missing: '+str(src))
+          lines=src.read_text().splitlines()
+          allocs=[(i,x.strip()) for i,x in enumerate(lines,1) if re.search(r'\bnew\s+(?:char|unsigned char)\s*\[|\bmalloc\s*\(',x)]
+          if not allocs: raise SystemExit('No allocation definition in compiled source')
+          line,statement=allocs[0]
+          pathlib.Path('../../results/real-allocation.json').write_text(json.dumps({'compiled_source':str(src.resolve()),'line':line,'statement':statement,'source_sha256':__import__('hashlib').sha256(src.read_bytes()).hexdigest()},indent=2))
+          print('ACTUAL_COMPILED_ALLOCATION='+str(src)+':'+str(line)+':'+statement)
+          PYSELECT
+          echo '=== Actual pass parser implementation ===' | tee ../../results/selector-parser-source.txt
+          grep -RInE 'Parsing target string|Parsed targeted source locations|VP_TARGETS_STR|parseTargetStr' src packages 2>/dev/null \
+            | head -n 140 | tee -a ../../results/selector-parser-source.txt || true
+          python3 - <<'PYGEN'
+          import json,pathlib
+          d=json.loads(pathlib.Path('../../results/real-allocation.json').read_text())
+          line=d['line']; name=pathlib.Path(d['compiled_source']).name
+          variants=[f'{name};main;{line}',f'{name};;{line}',f'main;{name};{line}',f';{name};{line}',f'{name}:{line}',f'{name};{line}',f'{d["compiled_source"]};main;{line}',f'{d["compiled_source"]};;{line}']
+          pathlib.Path('../../results/selector-candidates.json').write_text(json.dumps(variants,indent=2))
+          PYGEN
+          python3 - <<'PYREBUILD'
+          import json,os,pathlib,re,subprocess,sys
+          root=pathlib.Path('.'); out=pathlib.Path('../../results')
+          candidates=json.loads((out/'selector-candidates.json').read_text())
+          target=root/'build/targets/LibCalls'
+          builds=list(target.rglob('build.ninja'))
+          if not builds: raise SystemExit('Cannot force rebuild: no target build.ninja found')
+          report=[]; success=None
+          for index,selector in enumerate(candidates,1):
+              env=os.environ.copy(); env['VP_TARGETS_STR']=selector
+              print(f'=== SELECTOR ATTEMPT {index}/{len(candidates)}: {selector!r} ===',flush=True)
+              for buildfile in builds:
+                  proc=subprocess.run(['ninja','-C',str(buildfile.parent),'-t','clean'],capture_output=True,text=True,timeout=90)
+                  if proc.returncode: raise SystemExit(f'Cannot clean {buildfile.parent}: {proc.stderr}')
+              proc=subprocess.run(['timeout','480','python3','setup.py','build','LibCalls','QuickSafe'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=500)
+              logfile=out/f'selector-attempt-{index:02d}.log'; logfile.write_text(proc.stdout)
+              counts={k:[int(x) for x in re.findall(p,proc.stdout,re.I)] for k,p in {
+                'targets':r'Found\s+(\d+)\s+target\(s\)',
+                'heap':r'Found\s+(\d+)\s+targeted heap alloc\(s\)',
+                'stack':r'Found\s+(\d+)\s+targeted stack alloc\(s\)',
+                'defsites':r'Instrumenting\s+(\d+)\s+targeted defsite\(s\)'}.items()}
+              matched=proc.returncode==0 and max(counts['targets'] or [0])>0 and max(counts['defsites'] or [0])>0 and (max(counts['heap'] or [0])>0 or max(counts['stack'] or [0])>0)
+              item={'selector':selector,'exit':proc.returncode,'counts':counts,'verified':matched,'log':str(logfile)}
+              report.append(item); print('SELECTOR_RESULT='+json.dumps(item),flush=True)
+              if matched:
+                  success=item
+                  (out/'quicksafe-build.log').write_text((out/'quicksafe-build.log').read_text()+'\n=== VERIFIED REBUILD ===\n'+proc.stdout)
+                  (out/'verified-target-selector.txt').write_text(selector+'\n')
+                  with open(os.environ['GITHUB_ENV'],'a') as f: f.write('VP_TARGETS_STR='+selector+'\n')
+                  break
+          (out/'selector-attempts.json').write_text(json.dumps({'attempts':report,'verified':success},indent=2))
+          if not success: raise SystemExit('FAIL CLOSED: No candidate selected and instrumented a real allocation. Inspect selector-attempt logs and parser source.')
+          PYREBUILD
+
       - name: '09 - Verify QuickSafePass and LibCalls-specific outputs'
         if: steps.quicksafe_build.outcome == 'success'
         id: quicksafe_artifacts
@@ -731,13 +792,17 @@ jobs:
           target_specified=bool(os.environ.get('VP_TARGETS_STR','').strip())
           runtime_symbols=bool(re.search(r'guard_alloc|guard_dealloc|check_access|quicksafe\.globals_ctor',symbols,re.I))
           # A symbol or linked runtime alone does not prove memory accesses were instrumented.
-          proven=pass_invoked and plugin_linked and not skip and target_specified and not missing_libs
+          attempts=json.loads((out/'selector-attempts.json').read_text()) if (out/'selector-attempts.json').exists() else {}
+          verified=attempts.get('verified') or {}
+          proven=pass_invoked and plugin_linked and not skip and target_specified and not missing_libs and bool(verified.get('verified'))
           report={'pass_invoked':pass_invoked,'plugin_linked':plugin_linked,
                   'target_specified_in_step_environment':target_specified,
                   'target_selection_skipped':bool(skip),'skip_evidence':skip,
                   'runtime_symbols_detected':runtime_symbols,
                   'missing_runtime_libraries_with_explicit_path':missing_libs,
                   'instrumentation_preconditions_met':proven,
+                  'targeted_allocation_instrumented':bool(verified.get('verified')),
+                  'verified_instrumentation_counts':verified.get('counts',{}),
                   'target_selector':os.environ.get('VP_TARGETS_STR',''),
                   'memory_access_instrumentation_behavior_verified':False,
                   'protected_guard_bypass_tested':False,
@@ -772,6 +837,7 @@ jobs:
               'official_quicksafe_run_exit': exit_code('quicksafe-run.exit'),
               'official_quicksafe_run_verified': health('quicksafe-run-health.json', 'run_healthy'),
               'instrumentation_preconditions_met': health('instrumentation-audit.json', 'instrumentation_preconditions_met'),
+              'targeted_allocation_instrumented': health('instrumentation-audit.json', 'targeted_allocation_instrumented'),
               'memory_access_instrumentation_behavior_verified': False,
               'quicksafe_guard_bypass_tested': False,
               'quicksafe_vulnerability_confirmed': False,
