@@ -1,4 +1,4 @@
-name: QuickSafe v32 mechanism-aware paired attribution and security audit
+name: QuickSafe v32 mechanism-aware paired attribution and security audit (repaired)
 'on':
   push: null
   pull_request: null
@@ -1744,8 +1744,13 @@ jobs:
         python3 - <<'PYSUM'
         import json, pathlib, os
         out=pathlib.Path('results')
-        v=json.loads((out/'final-verdict.json').read_text())
-        s=json.loads((out/'v32-security-readiness.json').read_text())
+        verdict_path=out/'final-verdict.json'
+        readiness_path=out/'v32-security-readiness.json'
+        if not verdict_path.is_file() or not readiness_path.is_file():
+            print('V32_SUMMARY_SKIPPED: prerequisite reports missing; inspect earlier failed step')
+            raise SystemExit(0)
+        v=json.loads(verdict_path.read_text())
+        s=json.loads(readiness_path.read_text())
         profile_log=(out/'quicksafe-run.log')
         profile_text=profile_log.read_text(errors='replace') if profile_log.exists() else ''
         profile_missing=('No raw profiling data found' in profile_text or 'Found 0 raw profiling data files' in profile_text)
@@ -1785,7 +1790,12 @@ jobs:
         echo '### v32 mechanism-aware attribution' >> "$GITHUB_STEP_SUMMARY"
         python3 - <<'PYV32SUMMARY' >> "$GITHUB_STEP_SUMMARY"
         import json
-        r=json.load(open('results/v32-mechanism-attribution.json'))
+        from pathlib import Path
+        path=Path('results/v32-mechanism-attribution.json')
+        if not path.is_file():
+            print('Mechanism report missing; inspect preceding diagnostic steps.')
+            raise SystemExit(0)
+        r=json.loads(path.read_text())
         print('Paired cases:',r['case_count'],'; behavioral differences:',r['behavior_difference_count'])
         print('\nAllocation geometry equivalent:',r['equivalent_allocation_geometry_verified'])
         print('\nCausal enforcement attribution:',r['runtime_enforcement_causally_attributed'])
@@ -1811,11 +1821,12 @@ jobs:
                 return False
             return True
         assert gate(r,s,False), 'Diagnostic gate must pass for complete and consistent evidence'
-        assert not gate(r,s,True), 'Strict security gate unexpectedly passed without independently verified enforcement'
+        expected_strict = (r.get('security_validation_complete') is True and s.get('runtime_memory_access_enforcement_verified') is True and s.get('paired_quicksafe_on_off_positive_control_verified') is True)
+        assert gate(r,s,True) is expected_strict, 'Strict security gate does not match evidence'
         assert not gate({**r,'execution_complete':False},s,False), 'Missing evidence was accepted'
         assert not gate({**r,'result_status':'NO_CONFIRMED_BYPASS_IN_TESTED_CASES'},s,False), 'Contradictory verdict was accepted'
         assert not gate({**r,'security_validation_complete':True},s,False), 'Inconsistent security flags were accepted'
-        report={'revision':'v32-mechanism-attribution','diagnostic_gate_pass':True,'strict_security_gate_pass':False,'strict_security_gate_self_test_pass':True,'status':'INCONCLUSIVE_ENFORCEMENT_UNVERIFIED','note':'A paired QuickSafe-on/off comparison exists, but a causally attributed enforcement-positive control remains unverified; strict gate must reject this evidence.'}
+        report={'revision':'v32-mechanism-attribution','diagnostic_gate_pass':True,'strict_security_gate_pass':expected_strict,'strict_security_gate_self_test_pass':True,'status':r['result_status'],'note':'Strict security gate result is checked against actual evidence rather than hard-coded to fail.'}
         (out/'v32-gate-self-test.json').write_text(json.dumps(report,indent=2)+'\n')
         print('V32_SECURITY_GATE_SELF_TEST='+json.dumps(report,indent=2))
         PYGATE
