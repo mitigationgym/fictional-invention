@@ -1,20 +1,20 @@
 name: QuickSafe v31 paired runtime comparison and evidence attribution
 'on':
-  push: 'null'
-  pull_request: 'null'
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       require_security_validation:
         description: Fail workflow if QuickSafe runtime enforcement is not independently verified
-        required: 'false'
+        required: false
         type: boolean
-        default: 'false'
+        default: false
 permissions:
   contents: read
 jobs:
   quicksafe:
     runs-on: ubuntu-24.04
-    timeout-minutes: '120'
+    timeout-minutes: 120
     env:
       PYTHONUNBUFFERED: '1'
       LC_ALL: C
@@ -423,7 +423,7 @@ jobs:
         \ runtime behavior.'}\n(out/'instrumentation-audit.json').write_text(json.dumps(report,indent=2))\nprint('QUICKSAFE_INSTRUMENTATION_AUDIT='+json.dumps(report,indent=2),flush=True)\n\
         if not proven:\n    raise SystemExit('FAIL CLOSED: QuickSafe target instrumentation not established. Inspect VP_TARGETS_STR\
         \ and source target-selection evidence.')\nPY\n"
-      continue-on-error: 'true'
+      continue-on-error: true
     - name: 10c - Run actual instrumented QuickSafe protected allocation probe
       shell: bash
       run: "set -euo pipefail\ncd QuickSafe/quicksafe\npython3 - <<'PYPROBE'\nimport hashlib,json,os,pathlib,re,subprocess\n\
@@ -492,7 +492,7 @@ jobs:
         \ x['read_completed'] for x in results):\n    raise SystemExit('FAIL CLOSED: interval skip flagged without completed\
         \ read')\nif not report['probe_in_final_binary'] or not base_ok:\n    raise SystemExit('FAIL CLOSED: in-bounds instrumented\
         \ baseline did not complete')\nPYPROBE\n"
-      continue-on-error: 'true'
+      continue-on-error: true
     - name: 10d - Twenty mapped-destination guard-jump cases and differential controls
       shell: bash
       run: "set -euo pipefail\nmkdir -p results/jump-cases\ncat > results/jump-control.c <<'C'\n#define _GNU_SOURCE\n#include\
@@ -558,7 +558,7 @@ jobs:
         print('GUARD_JUMP_MATRIX_SUMMARY='+json.dumps({k:v for k,v in summary.items() if k!='cases'},indent=2),flush=True)\n\
         if summary['fail_count']:\n  for item in results:\n    if not item['passed']:print('FAIL='+json.dumps(item),flush=True)\n\
         \  sys.exit(1)\nPYJUMP\npython3 results/run-jump-matrix.py\n"
-      continue-on-error: 'true'
+      continue-on-error: true
     - name: 10e - Fifteen guard-jump write cases with parent-observed shared sentinels
       shell: bash
       run: "set -euo pipefail\nmkdir -p results/write-jump\ncat > results/write-jump/guard_write.c <<'CWRITE'\n#define _GNU_SOURCE\n\
@@ -607,7 +607,7 @@ jobs:
         (root/'summary.json').write_text(json.dumps(summary,indent=2))\nprint('WRITE_JUMP_SUMMARY='+json.dumps({k:v for k,v\
         \ in summary.items() if k!='cases'},indent=2),flush=True)\nif summary['failed']:\n  for x in cases:\n    if not x['passed']:print('FAILED_WRITE_CONTROL='+json.dumps(x),flush=True)\n\
         \  sys.exit(1)\nPYWRITE\n"
-      continue-on-error: 'true'
+      continue-on-error: true
     - name: 10f - Execute real QuickSafe allocation write probes with conservative evidence classification
       shell: bash
       run: "set -euo pipefail\npython3 - <<'PYWRITEPROTECTED'\nimport hashlib,json,os,pathlib,re,subprocess,sys\nout=pathlib.Path('results');\
@@ -650,7 +650,7 @@ jobs:
         if not report['baseline_write_verified']:raise SystemExit('FAIL CLOSED: protected in-bounds write/readback baseline\
         \ failed')\nif any(r['guard_interval_skip_write_observed'] and not r['write_completed_and_readback_verified'] for\
         \ r in rows):\n    raise SystemExit('FAIL CLOSED: invalid guard-skip classification')\nPYWRITEPROTECTED\n"
-      continue-on-error: 'true'
+      continue-on-error: true
     - name: 10g - Independently audit memory-access enforcement evidence (no unsupported claims)
       run: "set -euo pipefail\npython3 - <<'PYENFORCEMENT'\nimport hashlib,json,os,pathlib,re,subprocess\nout=pathlib.Path('results');\
         \ out.mkdir(exist_ok=True)\nroot=pathlib.Path('QuickSafe/quicksafe')\nbinary=root/'build/targets/LibCalls/bin/libcalls'\n\
