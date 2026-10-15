@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v11 - Install ccache and Fail-Closed Verification
+name: QuickSafe Ultra Verbose Research v12 - Ultra Verbose Runtime Evidence and Precise Failures
 
 on:
   push:
@@ -528,38 +528,102 @@ jobs:
               raise SystemExit('Missing QuickSafePass installation or built target files')
           PYART
 
-      - name: '10 - Run QuickSafe LibCalls only after verified build'
+      - name: '10 - Ultra-verbose QuickSafe LibCalls run and evidence-based verification'
         id: quicksafe_run
         if: steps.quicksafe_build.outcome == 'success' && steps.quicksafe_artifacts.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
           cd QuickSafe/quicksafe
+          target='build/targets/LibCalls/bin/libcalls'
+          echo '========== QUICKSAFE RUNTIME PRE-FLIGHT =========='
+          echo "PWD=$PWD"
+          echo "PATH=$PATH"
+          echo "PYTHON=$(command -v python3)"
+          echo "LLVM_CONFIG=$(command -v llvm-config)"
+          echo "TARGET=$target"
+          echo '=== Target directory listing ==='
+          ls -lah build/targets/LibCalls/bin/ || true
+          echo '=== Target file identification ==='
+          if [ -f "$target" ]; then
+            file "$target" || true
+            stat "$target" || true
+            ls -l "$target"
+            ldd "$target" || true
+          else
+            echo "PRE-FLIGHT ERROR: expected LibCalls executable absent: $target"
+          fi
+          echo '=== QuickSafePass installed files ==='
+          find build/packages/QuickSafePass/install -maxdepth 5 -type f -printf '%p (%s bytes)\n' | head -n 120 || true
+          echo '=== Run command and timestamps ==='
+          date -u '+RUN_START_UTC=%Y-%m-%dT%H:%M:%SZ'
+          printf '%s\n' 'COMMAND=timeout 600 python3 setup.py -v debug run LibCalls QuickSafe'
           set +e
-          timeout 600 python3 setup.py run LibCalls QuickSafe \
+          PYTHONUNBUFFERED=1 timeout 600 python3 setup.py -v debug run LibCalls QuickSafe \
             2>&1 | tee ../../results/quicksafe-run.log
           rc=${PIPESTATUS[0]}
           set -e
-          echo "$rc" > ../../results/quicksafe-run.exit
+          printf '%s\n' "$rc" > ../../results/quicksafe-run.exit
+          date -u '+RUN_END_UTC=%Y-%m-%dT%H:%M:%SZ'
+          echo "QUICKSAFE_RUN_PROCESS_EXIT=$rc"
+          echo '========== RUNTIME LOG FULL NUMBERED REPLAY =========='
+          nl -ba ../../results/quicksafe-run.log || true
+          echo '========== RUNTIME DIAGNOSTIC ANALYSIS =========='
           python3 - <<'PYRUN'
-          import json, pathlib, re
+          import json, pathlib, re, os, stat
           root = pathlib.Path('../../results')
           log = (root / 'quicksafe-run.log').read_text(errors='replace')
+          lines = log.splitlines()
           rc = int((root / 'quicksafe-run.exit').read_text())
+          target = pathlib.Path('build/targets/LibCalls/bin/libcalls')
           patterns = {
               'infra_fatal': r'\[(?:FTL|ERR|FAIL)\]',
-              'python_traceback': r'Traceback \(most recent call last\):|\bAssertionError\b',
+              'python_traceback': r'Traceback \(most recent call last\):|\b(?:AssertionError|FileNotFoundError|ModuleNotFoundError|ImportError)\b',
               'command_failure': r'(?i)Command (?:execution )?failed|Status:\s*[1-9][0-9]*',
-              'missing_target': r'(?i)does not exist!|No such file or directory',
+              'specific_missing_target': r'(?i)(?:target|binary|executable|libcalls)[^\n]{0,120}(?:does not exist!|No such file or directory)',
+              'build_system_failure': r'(?i)CMake Error|ninja: (?:error|build stopped)|make(?:\[[0-9]+\])?: \*\*\*',
           }
-          matched = [name for name, pat in patterns.items() if re.search(pat, log)]
-          healthy = rc == 0 and not matched
-          result = {'process_exit': rc, 'fatal_patterns': matched, 'run_healthy': healthy,
-                    'note': 'CLI and log health only; this is not a guard-page bypass test'}
+          evidence = []
+          for name, pattern in patterns.items():
+              for i, line in enumerate(lines):
+                  if re.search(pattern, line):
+                      evidence.append({'type': name, 'line': i + 1, 'text': line[:1200],
+                                       'context_before': lines[max(0,i-2):i],
+                                       'context_after': lines[i+1:i+4]})
+          informational = []
+          for i, line in enumerate(lines):
+              if re.search(r'(?i)(?:no raw profiling data found|found 0 raw profiling data files|nothing to parse)', line):
+                  informational.append({'line': i+1, 'text': line[:1200]})
+          # Important: "No raw profiling data found" is not a missing target.
+          # The executable is independently checked on disk.
+          target_exists = target.is_file()
+          target_executable = target_exists and os.access(target, os.X_OK)
+          healthy = rc == 0 and not evidence and target_executable
+          result = {
+              'process_exit': rc,
+              'target_path': str(target),
+              'target_exists': target_exists,
+              'target_executable': target_executable,
+              'fatal_patterns': sorted(set(e['type'] for e in evidence)),
+              'fatal_evidence': evidence,
+              'informational_profiling_messages': informational,
+              'run_healthy': healthy,
+              'profiling_required_for_success': False,
+              'note': 'Run and CLI health only. Not a QuickSafe guard-page bypass test.'
+          }
           (root / 'quicksafe-run-health.json').write_text(json.dumps(result, indent=2))
-          print('QUICKSAFE_RUN_HEALTH=' + json.dumps(result), flush=True)
+          (root / 'quicksafe-run-evidence.json').write_text(json.dumps(evidence, indent=2))
+          print('========== EXACT FATAL MATCHES WITH CONTEXT ==========')
+          if not evidence:
+              print('NO_FATAL_LOG_PATTERNS_FOUND')
+          for entry in evidence:
+              print(json.dumps(entry, ensure_ascii=False))
+          print('========== NON-FATAL PROFILING NOTES ==========')
+          for entry in informational:
+              print(json.dumps(entry, ensure_ascii=False))
+          print('QUICKSAFE_RUN_HEALTH=' + json.dumps(result, ensure_ascii=False), flush=True)
           if not healthy:
-              raise SystemExit('QuickSafe runtime failed; see quicksafe-run.log')
+              raise SystemExit('QuickSafe runtime verification failed; exact matching lines printed above')
           PYRUN
           echo 'QUICKSAFE_RUN_CLI_AND_LOG=PASS'
 
@@ -603,7 +667,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quicksafe-ultraverbose-v11
+          name: quicksafe-ultraverbose-v12
           path: |
             results/
             guard_control.c
