@@ -1,4 +1,4 @@
-name: QuickSafe v20 per-process guard interval evidence and provenance
+name: QuickSafe v21 mapped destination jump-over matrix and provenance
 on:
   push: null
   pull_request: null
@@ -111,7 +111,7 @@ jobs:
         assert Q.positive(3) is not None
         print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
         PY
-        echo "WORKFLOW_REVISION=v20-guard-interval-evidence" >> "$GITHUB_ENV"
+        echo "WORKFLOW_REVISION=v21-guard-jump-matrix" >> "$GITHUB_ENV"
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
         "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -133,7 +133,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        echo 'WORKFLOW_REVISION=v20-guard-interval-evidence'
+        echo 'WORKFLOW_REVISION=v21-guard-jump-matrix'
         python3 - <<'PYFIX'
         from pathlib import Path
         import ast
@@ -961,6 +961,135 @@ jobs:
         if not report['probe_in_final_binary'] or not base_ok:
             raise SystemExit('FAIL CLOSED: in-bounds instrumented baseline did not complete')
         PYPROBE
+    - name: 10d - Twenty mapped-destination guard-jump cases and differential controls
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p results/jump-cases
+        cat > results/jump-control.c <<'C'
+        #define _GNU_SOURCE
+        #include <sys/mman.h>
+        #include <unistd.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <stdint.h>
+        #include <string.h>
+        #include <inttypes.h>
+        #include <errno.h>
+        #include <limits.h>
+        __attribute__((noinline)) static unsigned char do_read(volatile unsigned char *p) {return *p;}
+        __attribute__((noinline)) static uint64_t do_read64(volatile uint64_t *p) {return *p;}
+        __attribute__((noinline)) static void do_read16(volatile unsigned char *p, unsigned char *dst) {for(int i=0;i<16;i++)dst[i]=p[i];}
+        __attribute__((noinline)) static void do_write(volatile unsigned char *p) {*p=0x7b;}
+        __attribute__((noinline)) static unsigned char helper(volatile unsigned char *p) {return do_read(p);}
+        int main(int argc,char **argv) {
+          if(argc!=7)return 90;
+          int id=atoi(argv[1]); size_t guards=strtoull(argv[2],0,10);
+          int opt=atoi(argv[3]); int readonly=atoi(argv[4]); int unaligned=atoi(argv[5]);
+          int protect=atoi(argv[6]);
+          long lpg=sysconf(_SC_PAGESIZE); if(lpg<=0)return 91;
+          size_t pg=(size_t)lpg, pages=guards+4;
+          if(guards<1||guards>128||pages>SIZE_MAX/pg)return 92;
+          unsigned char *base=mmap(NULL,pages*pg,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+          if(base==MAP_FAILED){perror("mmap");return 93;}
+          unsigned char *object=base+(unaligned?17:0);
+          unsigned char *g=base+pg;
+          if(mprotect(g,guards*pg,PROT_NONE)){perror("mprotect guard");return 94;}
+          unsigned char *dest=g+guards*pg;
+          // Case 15: add a second guard separated by an accessible page.
+          // Case 16: use a second readable page after the first destination.
+          if(id==15){if(mprotect(dest+pg,pg,PROT_NONE))return 95;dest+=2*pg;}
+          if(id==16)dest+=pg;
+          if(dest>=base+pages*pg)return 96;
+          size_t within=0;
+          switch(id){case 2:within=1;break;case 3:within=16;break;case 4:within=64;break;
+            case 5:within=256;break;case 6:within=1024;break;case 7:within=pg-1;break;
+            default:break;}
+          size_t width=(id==17?8:id==18?16:1);
+          if(within+width>pg)return 97;
+          unsigned char *target=dest+within;
+          if(readonly && id!=19){
+            // Make all accessible destination pages read-only, including the target.
+            if(mprotect(dest,pg,PROT_READ))return 98;
+          }
+          // Case 19 must remain writable to distinguish write enforcement from OS faults.
+          *object=0x35;
+          if(!readonly||id==19)*target=0x42;
+          printf("QS21_CASE=%d\nQS21_BASE=%p\nQS21_OBJECT=%p\nQS21_GUARD_START=%p\nQS21_GUARD_END=%p\nQS21_DEST=%p\nQS21_TARGET=%p\nQS21_PAGE_SIZE=%zu\nQS21_WIDTH=%zu\nQS21_READONLY=%d\nQS21_OPT=%d\nQS21_UNALIGNED=%d\nQS21_POLICY=%d\n",id,(void*)base,(void*)object,(void*)g,(void*)(g+guards*pg),(void*)dest,(void*)target,pg,width,readonly,opt,unaligned,protect);
+          FILE *fp=fopen("/proc/self/maps","r"); char line[1024];
+          if(!fp)return 99;
+          while(fgets(line,sizeof(line),fp)){
+            uintptr_t a=0,b=0;
+            if(sscanf(line,"%" SCNxPTR "-%" SCNxPTR,&a,&b)==2 && b>(uintptr_t)base && a<(uintptr_t)(base+pages*pg))printf("QS21_MAP=%s",line);
+          }
+          fclose(fp);
+          printf("QS21_ACCESS_BEGIN=1\n");fflush(stdout);
+          if(protect){
+            // Deliberately strict reference policy: the object is only one page.
+            // This is NOT QuickSafe instrumentation; it is a control oracle.
+            printf("QS21_POLICY_BLOCKED=1\n");fflush(stdout);return 40;
+          }
+          if(id==19){do_write(target);printf("QS21_WRITE_OK=1\nQS21_SENTINEL=%u\n",(unsigned)*target);}
+          else if(id==17){uint64_t x=do_read64((volatile uint64_t*)target);printf("QS21_READ_OK=1\nQS21_VALUE=%" PRIu64 "\n",x);}
+          else if(id==18){unsigned char buf[16];do_read16(target,buf);printf("QS21_READ_OK=1\nQS21_VALUE=%u\n",(unsigned)buf[0]);}
+          else {unsigned char x=id==20?helper(target):do_read(target);printf("QS21_READ_OK=1\nQS21_VALUE=%u\n",(unsigned)x);}
+          fflush(stdout);return 0;
+        }
+        C
+        cat > results/run-jump-matrix.py <<'PYJUMP'
+        import collections,hashlib,json,os,pathlib,re,subprocess,sys
+        out=pathlib.Path('results'); logs=out/'jump-cases';logs.mkdir(exist_ok=True)
+        page=os.sysconf('SC_PAGE_SIZE')
+        cases={1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:2,9:3,10:4,11:8,12:16,13:32,14:64,15:1,16:1,17:1,18:1,19:1,20:1}
+        # 20 geometries x 2 destination permission modes x 2 alignments x 2 optimization levels.
+        # Each variant has an OS-allowed attempt and a strict reference-policy control.
+        results=[]
+        for opt in (0,2):
+          exe=out/f'jump-control-O{opt}'
+          cmd=['clang-16',f'-O{opt}','-g','-fno-omit-frame-pointer','-Wall','-Wextra','-o',str(exe),str(out/'jump-control.c')]
+          subprocess.run(cmd,check=True,stdout=(out/f'jump-compile-O{opt}.log').open('w'),stderr=subprocess.STDOUT)
+          sha=hashlib.sha256(exe.read_bytes()).hexdigest()
+          for case,guard in cases.items():
+            for ro in (0,1):
+              for unaligned in (0,1):
+                for strict in (0,1):
+                  key=f'c{case:02d}-o{opt}-ro{ro}-ua{unaligned}-strict{strict}'
+                  argv=[str(exe),str(case),str(guard),str(opt),str(ro),str(unaligned),str(strict)]
+                  try:
+                    p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=10)
+                    rc,log=p.returncode,p.stdout
+                  except subprocess.TimeoutExpired as e:
+                    rc,log=None,(e.stdout or b'').decode(errors='replace') if isinstance(e.stdout,bytes) else str(e.stdout or '')
+                  (logs/f'{key}.log').write_text(log)
+                  def get(name):
+                    m=re.search(r'(?m)^'+re.escape(name)+r'=(.*)$',log)
+                    return m.group(1).strip() if m else None
+                  maps=[]
+                  for m in re.finditer(r'(?m)^QS21_MAP=([0-9a-fA-F]+)-([0-9a-fA-F]+)\s+([rwxps-]{4})',log):
+                    maps.append({'start':int(m.group(1),16),'end':int(m.group(2),16),'perms':m.group(3)})
+                  def address(name):
+                    x=get(name)
+                    return int(x,16) if x else None
+                  start,end,target=address('QS21_GUARD_START'),address('QS21_GUARD_END'),address('QS21_TARGET')
+                  target_map=next((m for m in maps if target is not None and m['start']<=target<m['end']),None)
+                  guard_covered=start is not None and end is not None and start<end and all(any(m['start']<=p and m['end']>=p+page and m['perms'].startswith('---') for m in maps) for p in range(start,end,page))
+                  read_ok=rc==0 and bool(re.search(r'(?m)^QS21_READ_OK=1$',log))
+                  write_ok=rc==0 and bool(re.search(r'(?m)^QS21_WRITE_OK=1$',log))
+                  blocked=rc==40 and bool(re.search(r'(?m)^QS21_POLICY_BLOCKED=1$',log))
+                  mapped=target_map is not None and ('w' in target_map['perms'] if case==19 else 'r' in target_map['perms'])
+                  jump=bool(guard_covered and mapped and target is not None and end<=target and (read_ok or write_ok))
+                  expected='STRICT_BLOCK' if strict else 'OS_MAPPED_ACCESS'
+                  passed=bool(guard_covered and mapped and (blocked if strict else (write_ok if case==19 else read_ok)))
+                  results.append({'id':key,'case':case,'guard_pages':guard,'optimization':opt,'read_only_destination':bool(ro),'unaligned_source':bool(unaligned),'strict_reference_policy':bool(strict),'expected':expected,'passed':passed,'exit_code':rc,'guard_interval_verified':guard_covered,'destination_permissions':target_map['perms'] if target_map else None,'destination_mapped_and_accessible':mapped,'jump_over_guard_observed':jump,'log':str(logs/f'{key}.log'),'binary_sha256':sha,'instrumentation':'UNPROTECTED_OS_CONTROL' if not strict else 'STRICT_REFERENCE_POLICY_CONTROL_NOT_QUICKSAFE'})
+        summary={'experiment':'MAPPED_GUARD_JUMP_DIFFERENTIAL_CONTROLS_NOT_QUICKSAFE','cases':results,'case_count':len(results),'pass_count':sum(x['passed'] for x in results),'fail_count':sum(not x['passed'] for x in results),'mapped_guard_jump_observations':sum(x['jump_over_guard_observed'] for x in results),'quicksafe_access_check_verified':False,'quicksafe_bypass_confirmed':False,'limitation':'These explicit mmap geometries are OS and strict-policy controls. QuickSafe-specific allocation instrumentation is audited in separate LibCalls tests; this matrix does not establish QuickSafe enforcement of mmap-derived pointers.'}
+        (out/'guard-jump-matrix.json').write_text(json.dumps(summary,indent=2))
+        print('GUARD_JUMP_MATRIX_SUMMARY='+json.dumps({k:v for k,v in summary.items() if k!='cases'},indent=2),flush=True)
+        if summary['fail_count']:
+          for item in results:
+            if not item['passed']:print('FAIL='+json.dumps(item),flush=True)
+          sys.exit(1)
+        PYJUMP
+        python3 results/run-jump-matrix.py
     - name: 11 - Publish unambiguous verdict
       if: always()
       shell: bash
@@ -982,7 +1111,14 @@ jobs:
         audit=json.loads(audit_path.read_text()) if audit_path.exists() else {}
         protected_path=out/'protected-runtime-experiment.json'
         protected=json.loads(protected_path.read_text()) if protected_path.exists() else {}
+        jump_path=out/'guard-jump-matrix.json'
+        jump=json.loads(jump_path.read_text()) if jump_path.exists() else {}
         report = {
+            'mapped_jump_control_cases': jump.get('case_count'),
+            'mapped_jump_control_passes': jump.get('pass_count'),
+            'mapped_jump_control_failures': jump.get('fail_count'),
+            'mapped_jump_observations_unprotected_only': jump.get('mapped_guard_jump_observations'),
+            'mapped_jump_matrix_is_quicksafe_bypass_evidence': False,
             'verified_selector': audit.get('target_selector'),
             'verified_binary_sha256': audit.get('final_binary_sha256'),
             'control_passed': control.get('passed') == 6 and control.get('failed') == 0,
@@ -1016,7 +1152,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: quicksafe-ultraverbose-v20
+        name: quicksafe-ultraverbose-v21
         path: |
           results/
           guard_control.c
