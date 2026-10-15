@@ -1,4 +1,4 @@
-name: QuickSafe Ultra Verbose Research v6 - Comprehensive Import Audit and Optional SPEC Repair
+name: QuickSafe Ultra Verbose Research v7 - Argcomplete and Comprehensive Startup Preflight
 
 on:
   push:
@@ -65,19 +65,19 @@ jobs:
           python3 -m venv "$GITHUB_WORKSPACE/.venv"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install \
-            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' packaging psutil pyelftools
+            'sympy==1.14.0' numpy scipy networkx pyyaml pytest z3-solver 'requests>=2.31,<3' 'argcomplete>=3,<5' packaging psutil pyelftools
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip check
           "$GITHUB_WORKSPACE/.venv/bin/python" - <<'PY'
           import sys
-          import sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, packaging, psutil, elftools
+          import sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, packaging, psutil, elftools
           from sympy import Q
           print('PYTHON_EXECUTABLE=', sys.executable)
-          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, packaging, psutil, elftools):
+          for mod in (sympy, numpy, scipy, networkx, yaml, pytest, z3, requests, argcomplete, packaging, psutil, elftools):
               print('IMPORT_OK=', mod.__name__, getattr(mod, '__version__', 'unknown'))
           assert Q.positive(3) is not None
           print('QUICKSAFE_SYMPY_Q_IMPORT=PASS')
           PY
-          echo "WORKFLOW_REVISION=v6-import-audit" >> "$GITHUB_ENV"
+          echo "WORKFLOW_REVISION=v7-argcomplete-import-audit" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
           echo "QUICKSAFE_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pip freeze | tee results/python-freeze.log
@@ -101,7 +101,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'WORKFLOW_REVISION=v6-import-audit'
+          echo 'WORKFLOW_REVISION=v7-argcomplete-import-audit'
           python3 - <<'PYFIX'
           from pathlib import Path
           import ast
@@ -160,7 +160,38 @@ jobs:
                     'parse_errors': parse_errors,
                     'unresolved_relative_imports': missing_relative}
           Path('results/import-audit.json').write_text(json.dumps(report, indent=2))
+          # Inventory third-party imports in the primary QuickSafe Python sources.
+          # This is diagnostic: some imports are optional or dynamically resolved.
+          import importlib.util
+          import sysconfig
+          roots = [repo / 'setup.py', *sorted((repo / 'targets').rglob('*.py')),
+                   *sorted((repo / 'instances').rglob('*.py')),
+                   *sorted((repo / 'packages').rglob('*.py')),
+                   *sorted((repo / 'infra' / 'infra').rglob('*.py'))]
+          top_imports = set()
+          for source in roots:
+              try:
+                  parsed = ast.parse(source.read_text(encoding='utf-8-sig'))
+              except (SyntaxError, UnicodeError):
+                  continue
+              for node in ast.walk(parsed):
+                  if isinstance(node, ast.Import):
+                      top_imports.update(alias.name.split('.')[0] for alias in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                      top_imports.add(node.module.split('.')[0])
+          local_names = {'infra', 'targets', 'instances', 'packages', 'tools'}
+          unresolved = []
+          for name in sorted(top_imports - local_names - sys.stdlib_module_names):
+              try:
+                  if importlib.util.find_spec(name) is None:
+                      unresolved.append(name)
+              except Exception as exc:
+                  unresolved.append(f'{name}: {type(exc).__name__}: {exc}')
+          report['absolute_imports_unresolved_or_optional'] = unresolved
+          Path('results/import-audit.json').write_text(json.dumps(report, indent=2))
           print(json.dumps(report, indent=2))
+          if unresolved:
+              print('WARNING: unresolved static imports (may be optional):', unresolved)
           if parse_errors:
               print('WARNING: Some upstream Python sources did not parse; see audit.', file=sys.stderr)
           PYFIX
@@ -175,7 +206,7 @@ jobs:
           set -euo pipefail
           echo "WORKFLOW_REVISION=${WORKFLOW_REVISION:-missing}"
           command -v python3
-          python3 -m pip show requests sympy
+          python3 -m pip show requests sympy argcomplete
           python3 - <<'PY'
           import sys
           from sympy import Q
@@ -190,6 +221,8 @@ jobs:
           from infra import Setup
           import infra
           import requests
+          import argcomplete
+          print('ARGCOMPLETE_PATH=', argcomplete.__file__)
           print('QUICKSAFE_SETUP_IMPORT=PASS')
           print('SETUP=', Setup)
           print('QUICKSAFE_INFRA_PATH=', infra.__file__)
@@ -198,7 +231,7 @@ jobs:
           print('REQUESTS_VERSION=', requests.__version__)
           PY
           # Verify the exact setup.py import chain before attempting any CLI commands.
-          python3 -c 'from infra import Setup; import requests; from sympy import Q; print("QUICKSAFE_SETUP_IMPORT_CHAIN=PASS")' \
+          python3 -c 'from infra import Setup; import requests, argcomplete; from sympy import Q; print("QUICKSAFE_SETUP_IMPORT_CHAIN=PASS")' \
             2>&1 | tee ../../results/setup-import-check.log
           python3 setup.py --help 2>&1 | tee ../../results/setup-help.log
           python3 setup.py build --help 2>&1 | tee ../../results/build-help.log
